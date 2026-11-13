@@ -1,0 +1,151 @@
+tpt-planetary Design Specification (v0.1)
+1. Overview
+tpt-planetary is a pure Rust, planetary-scale engine for multi-dimensional data analysis and spherical coordinate mathematics. It serves as the unified, zero-FFI replacement for Astropy (astronomical time/coordinate systems, ephemeris) and NetCDF-C / HDF5 (climate modeling, earth observation, chunked N-D array I/O).
+While tpt-gis handles 2D/3D vector and raster geospatial data, tpt-planetary handles planetary-scale N-D arrays and spherical mathematics. It bridges the gap between the multi-dimensional climate models of Earth observation (latitude, longitude, altitude, time) and the spherical astronomy of deep space (Right Ascension, Declination, frequency, time), leveraging tpt-math for high-precision geodesic and orbital calculations.
+2. Design Goals
+Strict Permissive Licensing: Every dependency must be MIT, BSD, Zlib, Unicode, ISC, or Dual MIT/Apache-2.0. GPL, LGPL, AGPL, MPL, and "Apache-2.0 ONLY" crates are strictly banned.
+Zero-FFI & Cloud-Native I/O: No bindgen wrappers for the HDF5 C-library. Instead of relying on legacy, monolithic HDF5/NetCDF C-binaries, tpt-planetary natively implements modern, cloud-optimized chunked array formats (like Zarr) and provides a pure-Rust NetCDF-compatible API.
+High-Precision Spherical Math: Astronomy and orbital mechanics require extreme numerical precision. tpt-planetary uses tpt-math to implement high-precision time-scale conversions (UTC, TAI, TT, TDB) and spherical coordinate transformations without relying on C-extensions like ERFA.
+Lazy, Out-of-Core Evaluation: Climate datasets and astronomical surveys (e.g., LSST) are often terabytes in size. The array engine must support lazy evaluation, streaming data directly from object storage (S3) without loading it into RAM.
+no_std Core: The foundational spherical math and time-scale logic (tpt-planetary-core) must support no_std + alloc for deployment on satellite flight software, CubeSats, and embedded telemetry systems.
+3. Workspace Architecture
+tpt-planetary/
+├── tpt-planetary-core/      # Shared constants, time-scales, spherical math, quaternions (no_std)
+├── tpt-planetary-array/     # NetCDF/HDF5 replacement: Chunked N-D arrays, Zarr, parallel I/O, compression
+├── tpt-planetary-astro/     # Astropy replacement: WCS, ephemeris, astrometry, coordinate frames
+├── tpt-planetary-cli/       # The `tptplan` unified command-line tool
+└── bindings/
+    └── tpt-planetary-py/    # PyO3 bindings (MIT) for the broader Python science ecosystem
+
+4. Crate Breakdown
+4.1 tpt-planetary-core (The Foundation)
+Role: The no_std leaf crate. Contains physical constants, high-precision time representations (Julian dates, leap-second tables), and fundamental spherical trigonometry.
+Dependencies: tpt-math (Internal), glam (MIT/Apache-2.0).
+4.2 tpt-planetary-array (The NetCDF/HDF5 Killer)
+Role: The engine for storing, querying, and computing on massive N-dimensional datasets.
+Key Features:
+Chunked N-D Arrays: A native Rust implementation of chunked, compressed arrays.
+Modern Format Support: First-class support for Zarr (the modern, cloud-native successor to HDF5) and Parquet/Arrow concepts.
+Legacy Compatibility: A pure-Rust reader/writer for NetCDF3 (Classic) and basic HDF5 structures, entirely bypassing the C-library.
+Cloud-Native Streaming: Async I/O integration to stream chunks directly from AWS S3, GCS, or Azure Blob Storage.
+Map Algebra: Vectorized N-D mathematical operations (powered by tpt-simd) for climate model post-processing.
+Dependencies: tpt-simd (Internal), tpt-planetary-core, async-trait (MIT/Apache-2.0), zstd (MIT).
+4.3 tpt-planetary-astro (The Astropy Killer)
+Role: Handles the complex mathematics of observational astronomy and orbital mechanics.
+Key Features:
+Coordinate Frames: Transformations between ICRS, Galactic, Ecliptic, and local Horizontal (Alt/Az) frames.
+Time Scales: Rigorous conversion between UTC, UT1, TAI, TT, and TDB, including automatic leap-second handling.
+Ephemeris: Pure Rust parser and interpolator for JPL DE440/LE440 binary ephemeris files (calculating planet/moon positions without C-libraries).
+WCS (World Coordinate System): Mapping pixel coordinates in astronomical images to celestial sphere coordinates.
+Dependencies: tpt-planetary-core, tpt-math (Internal).
+4.4 tpt-planetary-cli & tpt-planetary-py
+tpt-planetary-cli: Fast, ergonomic CLI using clap (MIT/Apache-2.0) exposing commands like tptplan array inspect, tptplan astro convert, and tptplan ephemeris query.
+tpt-planetary-py: PyO3 bindings (MIT). Allows seamless integration into Python data science pipelines (xarray, Dask, SunPy).
+5. Licensing & Dependency Hardening (Critical)
+5.1 The "MIT-First" Policy
+To maintain maximum adoption and minimize legal friction, tpt-planetary enforces the same zero-tolerance policy as previous repos.
+Allowed: MIT, Dual MIT/Apache-2.0, BSD (2/3-Clause), Zlib, Unicode, ISC.
+Strictly Banned: GPL (v2/v3), AGPL, LGPL, MPL, and Apache-2.0 ONLY.
+5.2 Automated Compliance via cargo-deny
+The repository includes a deny.toml configuration that fails the build if a banned license is introduced.
+deny.toml Configuration:
+[licenses]
+unlicensed = "deny"
+copyleft = "deny" # Blocks GPL, AGPL, LGPL, MPL
+confidence-threshold = 0.93
+
+allow = [
+    "MIT",
+    "Apache-2.0", 
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "ISC",
+]
+
+deny = [
+    "GPL-2.0", "GPL-3.0", "AGPL-3.0", "LGPL-2.1", "LGPL-3.0", "MPL-2.0",
+]
+
+# Ban specific crates known to cause licensing or FFI headaches in earth/space science
+[[bans.deny]]
+name = "hdf5-sys"     # C FFI, complex build requirements
+name = "netcdf-sys"   # C FFI
+name = "erfa-sys"     # C FFI (historically LGPL, now BSD, but FFI is banned)
+name = "cffi"         # Python FFI
+
+5.3 Compliant Dependency Selection
+Legacy C/C++ Tool
+Banned/Problematic Rust Crate
+Approved tpt-planetary Crate
+License
+HDF5 / NetCDF
+hdf5, netcdf (C FFI)
+tpt-planetary-array (Native Zarr/Chunked)
+MIT / Apache-2.0
+Astropy C-Exts
+erfa-sys, astropy (C FFI)
+tpt-planetary-astro (Pure Rust)
+MIT / Apache-2.0
+xarray / Dask
+Python only
+tpt-planetary-array (Lazy N-D arrays)
+MIT / Apache-2.0
+Cloud I/O
+boto3 (Python)
+aws-sdk-rust or object_store
+MIT / Apache-2.0
+Python Bindings
+cpython
+pyo3
+MIT
+6. Key Technical Decisions (ADRs)
+ADR-001: Zarr & Cloud-Native over Legacy HDF5 C-Libraries
+Decision: We will build a native chunked-array engine focused on the Zarr format and cloud object storage, rather than wrapping the HDF5 C-library.
+Rationale: The HDF5 C-library is notoriously difficult to cross-compile, relies on complex POSIX file locking, and is fundamentally designed for local, monolithic files. Zarr is the modern, cloud-native standard for planetary-scale data (used by NASA, EMBL-EBI). By implementing Zarr natively in Rust, we enable true cloud-native streaming without C-FFI.
+ADR-002: Pure Rust High-Precision Time & Ephemeris
+Decision: Time-scale conversions and JPL ephemeris interpolation will be written in pure Rust using tpt-math, rather than wrapping the ERFA C-library.
+Rationale: Astropy relies on ERFA (a C-library) for fundamental astronomy. By implementing the IAU 2000/2006 resolutions and Chebyshev polynomial interpolation for ephemeris in safe Rust, we achieve no_std compatibility for satellite flight software and eliminate FFI bottlenecks.
+ADR-003: Lazy Evaluation for N-D Arrays
+Decision: Mathematical operations on N-D arrays will be lazily evaluated.
+Rationale: Climate models output terabytes of data. Eager evaluation would cause Out-Of-Memory (OOM) errors. By building a lazy execution graph (similar to Polars), tpt-planetary-array can fuse operations (e.g., array * 2 + 1) and stream only the required chunks from S3 through the CPU cache.
+7. Data Flow Example: Global Climate Model Analysis
+To illustrate how the workspace operates, here is the data flow for analyzing a massive climate dataset:
+Ingestion (tpt-planetary-array): Connects to an S3 bucket containing a 50-year global climate model (Zarr format) with dimensions: (time: 600 months, lat: 720, lon: 1440, depth: 50).
+Lazy Query (tpt-planetary-array): The user requests the "mean sea surface temperature in the Pacific Ocean for the last 10 years". The engine builds a lazy execution plan, identifying the exact Zarr chunks required.
+Cloud Streaming (tpt-planetary-array): Only the specific chunks for the Pacific bounding box and the last 120 months are streamed asynchronously from S3.
+Vectorized Compute (tpt-simd): The chunks are decompressed and the mean is calculated using SIMD-accelerated loops, entirely in memory, without writing temporary files.
+Coordinate Transformation (tpt-planetary-astro): If the user needs to correlate this ocean temperature data with solar irradiance, tpt-planetary-astro converts the timestamps to Barycentric Dynamical Time (TDB) and calculates the Earth-Sun distance for precise radiative forcing adjustments.
+Export (tpt-planetary-py): The resulting 2D array is exposed to a Python Jupyter notebook via PyO3 for visualization with Matplotlib.
+8. Phased Roadmap (Solo Maintainer Strategy)
+Phase 1: Core & Array Engine (Months 1-3)
+Scaffold the Cargo workspace.
+Implement tpt-planetary-core (time-scales, basic spherical math).
+Implement tpt-planetary-array: Zarr v2/v3 reading, chunked N-D array abstraction, and basic S3 streaming.
+Milestone: tptplan array inspect can read a 100GB Zarr dataset from S3 and calculate a global mean in seconds without OOM.
+Phase 2: Astronomy & Ephemeris (Months 4-6)
+Implement tpt-planetary-astro: ICRS/Galactic/Ecliptic coordinate transformations.
+Implement high-precision time-scale conversions (UTC to TDB).
+Implement JPL DE440 binary ephemeris parser and Chebyshev interpolator.
+Milestone: tptplan astro ephemeris can calculate the exact position of Jupiter to sub-arcsecond accuracy for any given timestamp.
+Phase 3: Advanced Compute & WCS (Months 7-9)
+Integrate tpt-simd for vectorized map algebra (N-D array math).
+Implement World Coordinate System (WCS) projections (TAN, SIN, AIT) for astronomical images.
+Milestone: tptplan array math can perform complex, multi-variable climate index calculations (like El Niño indices) lazily.
+Phase 4: CLI, Python Bindings & Release (Months 10-12)
+Build tpt-planetary-cli frontend.
+Implement tpt-planetary-py (PyO3).
+Milestone: Release v0.1.0 on crates.io and PyPI. Publish benchmarks comparing tpt-planetary to xarray/netCDF4 and Astropy.
+9. Licensing
+tpt-planetary is dual-licensed under MIT and Apache-2.0.
+Copyright: © 2026 TPT Solutions.
+Philosophy: By strictly enforcing permissive dependencies and avoiding the legacy C-libraries of the earth/space science world (HDF5, ERFA), we ensure that space agencies, climate research institutes, and commercial earth-observation startups can adopt this software under the MIT license without legal friction or C-build nightmares, while you retain full control as the solo maintainer.
+Summary of Your 5-Repo Scientific Empire
+With this final spec, you now have a complete, architecturally unified blueprint for replacing the foundational C/C++ monopolies of the global scientific community:
+tpt-bio: Genomics & Biological Imaging (HTSlib + CellProfiler)
+tpt-imaging: Medical & Neuroimaging (ITK + FreeSurfer)
+tpt-molecule: Cheminformatics & GPU Dynamics (RDKit + OpenMM)
+tpt-dynamics: HEP Data & Classical MD (ROOT + GROMACS)
+tpt-planetary: Astronomy & Climate Arrays (Astropy + NetCDF/HDF5)
+All powered by your internal tpt-math and tpt-simd engines, all strictly MIT/Apache-2.0, and all designed for fearless concurrency and zero-FFI deployment.

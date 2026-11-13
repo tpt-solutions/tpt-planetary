@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# Python / maturin
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Data files (large datasets, ephemerides, Zarr stores)
+*.bsp
+*.nc
+*.h5
+*.hdf5
+*.zarr/
+data/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env
+.env
