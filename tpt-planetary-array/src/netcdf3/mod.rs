@@ -304,7 +304,7 @@ impl NcValues {
     /// Decodes big-endian `bytes` of type `nc_type`.
     pub(crate) fn decode_be(nc_type: NcType, bytes: &[u8]) -> Result<Self> {
         let size = nc_type.size();
-        if bytes.len() % size != 0 {
+        if !bytes.len().is_multiple_of(size) {
             return Err(Error::SizeMismatch {
                 expected: bytes.len() - bytes.len() % size,
                 actual: bytes.len(),

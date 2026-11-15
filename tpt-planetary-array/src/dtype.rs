@@ -237,7 +237,7 @@ impl DType {
             )));
         }
         let size = self.item_size();
-        if bytes.len() % size != 0 {
+        if !bytes.len().is_multiple_of(size) {
             return Err(Error::SizeMismatch {
                 expected: bytes.len() - bytes.len() % size,
                 actual: bytes.len(),

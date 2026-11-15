@@ -8,7 +8,7 @@ use crate::lazy::{Block, Region};
 /// Calls `f` with every multi-index of a block of the given `counts`, in C
 /// order (last dimension fastest). Calls nothing if any count is zero.
 pub(crate) fn for_each_index(counts: &[u64], mut f: impl FnMut(&[u64])) {
-    if counts.iter().any(|&c| c == 0) {
+    if counts.contains(&0) {
         return;
     }
     let mut idx = vec![0u64; counts.len()];
@@ -44,5 +44,5 @@ pub(crate) fn empty_block() -> Block {
 
 /// True if the region contains no elements.
 pub(crate) fn is_empty_region(region: &Region) -> bool {
-    region.count.iter().any(|&c| c == 0)
+    region.count.contains(&0)
 }

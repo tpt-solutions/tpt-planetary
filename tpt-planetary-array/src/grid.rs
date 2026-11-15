@@ -44,7 +44,7 @@ impl ChunkGrid {
                 chunk_shape.len()
             )));
         }
-        if chunk_shape.iter().any(|&c| c == 0) {
+        if chunk_shape.contains(&0) {
             return Err(Error::InvalidMetadata(
                 "chunk sizes must be positive".into(),
             ));

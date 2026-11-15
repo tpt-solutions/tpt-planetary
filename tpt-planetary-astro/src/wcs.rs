@@ -471,11 +471,11 @@ fn parse_header(text: &str) -> Result<WcsParams> {
                     if let Some(n) = number {
                         pc[pair.0][pair.1] = n;
                     }
-                } else if let Some(pair) = key.strip_prefix("CD").and_then(parse_pair) {
-                    if let Some(n) = number {
-                        cd[pair.0][pair.1] = n;
-                        have_cd = true;
-                    }
+                } else if let Some(pair) = key.strip_prefix("CD").and_then(parse_pair)
+                    && let Some(n) = number
+                {
+                    cd[pair.0][pair.1] = n;
+                    have_cd = true;
                 }
             }
         }

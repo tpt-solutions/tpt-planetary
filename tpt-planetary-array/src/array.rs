@@ -340,7 +340,7 @@ fn copy_nd(
     counts: &[usize],
     itemsize: usize,
 ) {
-    if counts.iter().any(|&c| c == 0) {
+    if counts.contains(&0) {
         return;
     }
     let nd = counts.len();

@@ -413,7 +413,7 @@ impl BlockIter {
             block[d] = take;
             left = (left / take).max(1);
         }
-        let done = shape.iter().any(|&s| s == 0);
+        let done = shape.contains(&0);
         Self {
             shape: shape.to_vec(),
             block,

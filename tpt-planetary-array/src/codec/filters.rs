@@ -106,7 +106,7 @@ impl Codec for DeltaCodec {
 impl DeltaCodec {
     fn run(&self, input: &[u8], encode: bool) -> Result<Vec<u8>> {
         let size = self.dtype.item_size();
-        if input.len() % size != 0 {
+        if !input.len().is_multiple_of(size) {
             return Err(Error::SizeMismatch {
                 expected: input.len() - input.len() % size,
                 actual: input.len(),
@@ -179,10 +179,10 @@ pub(crate) fn delta_factory(config: &Value, dtype: &DType) -> Result<Box<dyn Cod
         Some(s) => DType::from_v2(s)?,
         None => *dtype,
     };
-    if let Some(astype) = config.get("astype").and_then(Value::as_str) {
-        if DType::from_v2(astype)? != d {
-            return Err(Error::Unsupported("delta filter with astype".into()));
-        }
+    if let Some(astype) = config.get("astype").and_then(Value::as_str)
+        && DType::from_v2(astype)? != d
+    {
+        return Err(Error::Unsupported("delta filter with astype".into()));
     }
     Ok(Box::new(DeltaCodec::new(d)?))
 }

@@ -299,13 +299,10 @@ impl<'a> LeapSecondTable<'a> {
                 CivilDate::new(e.year, e.month, e.day),
                 CalendarSystem::Gregorian,
             )?;
-            match prev {
-                None => {}
-                Some((pk, pv)) => {
-                    if k <= pk || e.tai_minus_utc != pv + 1 {
-                        return Err(Error::InvalidLeapSecondTable);
-                    }
-                }
+            if let Some((pk, pv)) = prev
+                && (k <= pk || e.tai_minus_utc != pv + 1)
+            {
+                return Err(Error::InvalidLeapSecondTable);
             }
             prev = Some((k, e.tai_minus_utc));
         }

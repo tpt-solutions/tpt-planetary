@@ -126,7 +126,7 @@ impl Writer {
             .ok_or_else(|| Error::Unsupported(format!("variable '{name}' is too large")))?;
         let size = values.nc_type().size();
         if is_record {
-            if elements == 0 || values.len() % elements != 0 {
+            if elements == 0 || !values.len().is_multiple_of(elements) {
                 return Err(Error::InvalidMetadata(format!(
                     "variable '{name}' has {} values, which is not a whole number of records of {elements}",
                     values.len()

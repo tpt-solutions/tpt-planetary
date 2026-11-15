@@ -46,10 +46,10 @@ pub fn parse_array(zarray: &[u8], zattrs: Option<&[u8]>) -> Result<ArrayMetadata
         .ok_or_else(|| Error::Unsupported("structured dtypes are not supported".into()))?;
     let dtype = DType::from_v2(dtype_str)?;
 
-    if let Some(order) = obj.get("order").and_then(Value::as_str) {
-        if order != "C" {
-            return Err(Error::Unsupported(format!("array order '{order}'")));
-        }
+    if let Some(order) = obj.get("order").and_then(Value::as_str)
+        && order != "C"
+    {
+        return Err(Error::Unsupported(format!("array order '{order}'")));
     }
 
     let fill_value = FillValue::from_json(field(&obj, "fill_value")?)?;

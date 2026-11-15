@@ -150,16 +150,16 @@ fn single_char(s: &str) -> Result<char> {
 /// Parses a v3 fill value. Floats may also be given as hexadecimal bit
 /// patterns (`"0x7fc00000"`).
 fn parse_fill(v: &Value, dtype: &DType) -> Result<FillValue> {
-    if let (Value::String(s), true) = (v, dtype.is_float()) {
-        if let Some(hex) = s.strip_prefix("0x") {
-            let bits = u64::from_str_radix(hex, 16)
-                .map_err(|_| Error::InvalidMetadata(format!("bad hex fill '{s}'")))?;
-            return match dtype.kind() {
-                Kind::Float(32) => Ok(FillValue::Float(f64::from(f32::from_bits(bits as u32)))),
-                Kind::Float(_) => Ok(FillValue::Float(f64::from_bits(bits))),
-                _ => Err(Error::Unsupported("hex fill for complex dtype".into())),
-            };
-        }
+    if let (Value::String(s), true) = (v, dtype.is_float())
+        && let Some(hex) = s.strip_prefix("0x")
+    {
+        let bits = u64::from_str_radix(hex, 16)
+            .map_err(|_| Error::InvalidMetadata(format!("bad hex fill '{s}'")))?;
+        return match dtype.kind() {
+            Kind::Float(32) => Ok(FillValue::Float(f64::from(f32::from_bits(bits as u32)))),
+            Kind::Float(_) => Ok(FillValue::Float(f64::from_bits(bits))),
+            _ => Err(Error::Unsupported("hex fill for complex dtype".into())),
+        };
     }
     FillValue::from_json(v)
 }
