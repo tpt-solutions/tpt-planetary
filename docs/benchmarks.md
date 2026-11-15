@@ -170,3 +170,20 @@ open. To do them properly they need:
 - A quick-mode number is only for checking that a change did not break
   performance by an order of magnitude.
 - Do not compare numbers across machines or toolchains.
+
+## Reference comparison (Windows, Python)
+
+Single run on the machine above, Python 3.13, `tpt_planetary` built with
+`maturin develop --release`, astropy 8.0.2 and numpy 2.5.4. Both sides convert
+the same 10,000 seeded random ICRS positions in one array call. The median of
+50 runs (tpt_planetary) and 20 runs (astropy) is shown. The Astropy timing covers
+only `transform_to("galactic")` on a `SkyCoord` built beforehand. It is not a
+claim about performance in general, and it does not include the cost of
+building the `SkyCoord`.
+
+| Implementation | Call | Median | Min |
+| --- | --- | --- | --- |
+| tpt_planetary | `icrs_to_galactic(ra, dec)` | 0.550 ms | 0.541 ms |
+| astropy 8.0.2 | `SkyCoord.transform_to("galactic")` | 1.885 ms | 1.851 ms |
+
+The two outputs agree to 0.025 arcsec (see `docs/validation.md`).
