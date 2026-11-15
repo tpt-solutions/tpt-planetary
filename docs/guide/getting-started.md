@@ -2,12 +2,12 @@
 
 ## Toolchain and MSRV
 
-- The toolchain is pinned in `rust-toolchain.toml`: channel `1.85.0`, with the
+- The toolchain is pinned in `rust-toolchain.toml`: channel `1.95.0`, with the
   `rustfmt` and `clippy` components. `rustup` picks it up automatically inside
   the repository.
-- The minimum supported Rust version (MSRV) is **1.85**. It is declared as
+- The minimum supported Rust version (MSRV) is **1.95**. It is declared as
   `rust-version` in the workspace `Cargo.toml`, and CI builds the workspace on
-  1.85.0 in a separate job.
+  1.95.0 in a separate job.
 - The edition is 2024.
 - `tpt-simd` needs Rust 1.95, so it is not a dependency. Revisiting the MSRV
   when it is added is recorded in `docs/dependencies.md`.

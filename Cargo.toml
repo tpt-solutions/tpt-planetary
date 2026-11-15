@@ -13,7 +13,7 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
 repository = "https://github.com/tpt-solutions/tpt-planetary"
@@ -36,3 +36,9 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# MIT-licensed, API-compatible replacement for target-lexicon (Apache-2.0 WITH
+# LLVM-exception is not on the deny.toml allow list). Used only by the PyO3
+# build script. Path is relative to this repository's root.
+[patch.crates-io]
+target-lexicon = { path = "../target-lexicon-mit" }

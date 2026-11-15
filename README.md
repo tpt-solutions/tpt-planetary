@@ -49,7 +49,7 @@ tpt-planetary-core    constants, time scales, spherical math   (no_std)
 
 ## Building
 
-The toolchain is pinned in `rust-toolchain.toml` (MSRV 1.85).
+The toolchain is pinned in `rust-toolchain.toml` (MSRV 1.95).
 
 ```sh
 cargo build --workspace

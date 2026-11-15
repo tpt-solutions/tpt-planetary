@@ -11,8 +11,9 @@ records the reasoning behind each choice, which `deny.toml` cannot capture.
 - Banned: GPL, LGPL, AGPL, MPL, and any crate that is a C FFI wrapper.
 - `tpt-planetary-core` must build for `no_std` (checked with
   `thumbv7em-none-eabihf`). Every dependency it uses must pass that build.
-- MSRV is 1.85. A dependency whose `rust-version` is higher is not adopted
-  unless the MSRV is raised as a recorded decision.
+- MSRV is 1.95 (raised from 1.85 by decision on 2026-11-16, so that `tpt-simd` and
+  `ruzstd` can be adopted). A dependency whose `rust-version` is higher is not
+  adopted unless the MSRV is raised as a recorded decision.
 
 ## Core dependencies
 
@@ -52,7 +53,7 @@ Not adopted: `ruzstd` (needs Rust 1.87, above MSRV).
 |---|---|---|---|---|
 | `pyo3` | 0.30.1 | MIT OR Apache-2.0 | 1.85 | `abi3-py39`, one wheel per platform. |
 | `numpy` (rust-numpy) | 0.30.0 | BSD-2-Clause | 1.85 | NumPy interop. |
-| `target-lexicon` | 0.13.6 | Apache-2.0 WITH LLVM-exception | (in pyo3-build-config) | Build-time only, pulled in by `pyo3-build-config`. **Not on the `deny.toml` allow list, and `cargo deny check` currently fails on it.** The spec bans Apache-2.0-only licences, so this needs a decision (see `todo.md`). |
+| `target-lexicon` | 0.13.6 (substitute) | MIT | 1.95 | **Replaced.** The upstream crate is Apache-2.0 WITH LLVM-exception, which the policy bans. The workspace patches it with the MIT-licensed, API-compatible crate at `../target-lexicon-mit` (`[patch.crates-io]` in the root `Cargo.toml`). Build-time only, used by `pyo3-build-config`. The patch uses a path outside this repository, so CI needs that path checked out or the substitute published. |
 
 ## Adopted in benchmarks and fuzzing (dev-only)
 
@@ -81,8 +82,8 @@ Not adopted: `ruzstd` (needs Rust 1.87, above MSRV).
 
 ## Open decisions
 
-- **MSRV.** The workspace pins 1.85. Two candidates need more: `tpt-simd`
-  needs 1.95 and `ruzstd` 0.9.1 needs 1.87. Either raise the MSRV in a dated
-  decision, or choose older versions.
+- **MSRV (decided).** Raised to 1.95 on 2026-11-16. This was required by the
+  `target-lexicon` substitute (which declares 1.95) and admits `tpt-simd` (1.95)
+  and `ruzstd` (1.87). The toolchain pin, CI MSRV job and fuzz crate follow it.
 - **`tpt-math` in `core`.** Not usable on `no_std` today. Either keep it out of
   `core`, or ask upstream for `#![no_std]`.

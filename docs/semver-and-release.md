@@ -33,7 +33,7 @@ together. Until 1.0.0:
   and additive changes that do not change any public signature.
 - Items that are new but could still change may be marked `#[doc(hidden)]`
   or documented as unstable. Do not use feature flags as the only marker.
-- The MSRV is 1.85 (`rust-version` in `[workspace.package]`). Raising it is a
+- The MSRV is 1.95 (`rust-version` in `[workspace.package]`). Raising it is a
   minor bump before 1.0 and is listed in the changelog. It is not a patch
   change.
 - `tpt-planetary-core` keeps its `no_std` build (`--no-default-features`)

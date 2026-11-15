@@ -8,7 +8,7 @@ This package is MIT OR Apache-2.0. It is not published to PyPI yet.
 
 ## Build from source
 
-Requires Rust 1.85 or newer, Python 3.9 or newer and
+Requires Rust 1.95 or newer, Python 3.9 or newer and
 [maturin](https://www.maturin.rs/).
 
 ```sh

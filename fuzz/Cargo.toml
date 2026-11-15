@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "cargo-fuzz targets for tpt-planetary parsers (not part of the workspace)"
 publish = false
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
 # Standalone workspace: this crate is excluded from the root workspace.
