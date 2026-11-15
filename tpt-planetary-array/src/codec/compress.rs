@@ -189,6 +189,96 @@ impl Codec for Lz4Codec {
     }
 }
 
+/// Zstandard level that the encoder accepts (Zarr `level` 1, the numcodecs default).
+/// ruzstd only implements its "Fastest" mode, which it describes as roughly level 1.
+const ZSTD_ENCODE_LEVEL: i64 = 1;
+
+/// Zstandard via `ruzstd` (MIT, pure Rust, `no_std` with `alloc`).
+///
+/// Decoding accepts one or more concatenated frames, as produced by the zstd
+/// CLI and numcodecs. Content checksums are verified (ruzstd `hash` feature,
+/// which adds `twox-hash`, MIT), so a corrupted frame is an error.
+///
+/// Encoding works only at level 1. Any other level returns
+/// [`Error::Unsupported`]: ruzstd panics for its unimplemented levels, so they
+/// are rejected before reaching the encoder.
+#[derive(Debug, Clone, Copy)]
+pub struct ZstdCodec {
+    level: i64,
+}
+
+impl ZstdCodec {
+    /// Creates a zstd codec. `level` is recorded for metadata; only level 1
+    /// can be used to encode.
+    pub fn new(level: i64) -> Self {
+        Self { level }
+    }
+
+    /// The configured compression level.
+    pub fn level(&self) -> i64 {
+        self.level
+    }
+}
+
+impl Codec for ZstdCodec {
+    fn name(&self) -> &str {
+        "zstd"
+    }
+
+    fn encode(&self, input: &[u8]) -> Result<Vec<u8>> {
+        if self.level != ZSTD_ENCODE_LEVEL {
+            return Err(Error::Unsupported(format!(
+                "zstd encode at level {}: only level {ZSTD_ENCODE_LEVEL} is supported",
+                self.level
+            )));
+        }
+        let mut out = Vec::new();
+        ruzstd::encoding::compress(input, &mut out, ruzstd::encoding::CompressionLevel::Fastest);
+        Ok(out)
+    }
+
+    fn decode(&self, input: &[u8]) -> Result<Vec<u8>> {
+        use ruzstd::io::Read;
+
+        let mut out = Vec::new();
+        let mut rest = input;
+        loop {
+            let mut decoder = ruzstd::decoding::StreamingDecoder::new(rest)
+                .map_err(|e| Error::Codec(format!("zstd: {e}")))?;
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| Error::Codec(format!("zstd: {e}")))?;
+            let (remaining, frame) = decoder.into_parts();
+            // ruzstd reports the stored and recomputed checksums but does not
+            // compare them, so a mismatch is checked here.
+            if let (Some(stored), Some(calculated)) = (
+                frame.get_checksum_from_data(),
+                frame.get_calculated_checksum(),
+            ) && stored != calculated
+            {
+                return Err(Error::Codec(format!(
+                    "zstd: content checksum mismatch (stored {stored:#010x}, computed {calculated:#010x})"
+                )));
+            }
+            rest = remaining;
+            if rest.is_empty() {
+                return Ok(out);
+            }
+        }
+    }
+}
+
+pub(crate) fn zstd_factory(config: &Value, _dtype: &DType) -> Result<Box<dyn Codec>> {
+    let level = config_i64(config, "level")?.unwrap_or(ZSTD_ENCODE_LEVEL);
+    // Range accepted by the zstd library (negative levels are fast modes).
+    if !(-131_072..=22).contains(&level) {
+        return Err(Error::InvalidMetadata(format!(
+            "zstd level {level} outside -131072..=22"
+        )));
+    }
+    Ok(Box::new(ZstdCodec::new(level)))
+}
+
 pub(crate) fn gzip_factory(config: &Value, _dtype: &DType) -> Result<Box<dyn Codec>> {
     Ok(Box::new(GzipCodec::new(level_from(config)?)))
 }
@@ -253,5 +343,113 @@ mod tests {
         assert_eq!(&enc[..4], &(data.len() as u32).to_le_bytes());
         assert_eq!(c.decode(&enc).unwrap(), data);
         assert_eq!(c.decode(&c.encode(&[]).unwrap()).unwrap(), Vec::<u8>::new());
+    }
+
+    /// Plaintext of the zstd reference streams: 4000 bytes, `(i*i) % 251`.
+    fn zstd_plain() -> Vec<u8> {
+        (0..4000u32).map(|i| ((i * i) % 251) as u8).collect()
+    }
+
+    // Reference streams made with the zstd CLI v1.5.7 (zstd.exe, Poppler build).
+    // Commands: `zstd -1` on bytes 0..2000 (first half), `zstd -19` on bytes
+    // 2000..4000 (second half), `zstd -3 --no-check` on all 4000 bytes, and the
+    // first and second frames concatenated.
+    const ZSTD_L1_FIRST_HALF: &[u8] =
+        include_bytes!("testdata/zstd_cli_l1_checksum_first_half.zst");
+    const ZSTD_L19_SECOND_HALF: &[u8] =
+        include_bytes!("testdata/zstd_cli_l19_checksum_second_half.zst");
+    const ZSTD_L3_FULL_NO_CHECKSUM: &[u8] =
+        include_bytes!("testdata/zstd_cli_l3_no_checksum_full.zst");
+    const ZSTD_CONCATENATED: &[u8] = include_bytes!("testdata/zstd_cli_concatenated_frames.zst");
+
+    #[test]
+    fn zstd_round_trip_level_1() {
+        let c = ZstdCodec::new(1);
+        let data = sample();
+        let enc = c.encode(&data).unwrap();
+        assert_eq!(c.decode(&enc).unwrap(), data);
+        let empty = c.encode(&[]).unwrap();
+        assert_eq!(c.decode(&empty).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn zstd_decodes_zstd_cli_streams() {
+        let c = ZstdCodec::new(1);
+        let plain = zstd_plain();
+        assert_eq!(c.decode(ZSTD_L1_FIRST_HALF).unwrap(), plain[..2000]);
+        assert_eq!(c.decode(ZSTD_L19_SECOND_HALF).unwrap(), plain[2000..]);
+        assert_eq!(c.decode(ZSTD_L3_FULL_NO_CHECKSUM).unwrap(), plain);
+    }
+
+    #[test]
+    fn zstd_decodes_concatenated_frames() {
+        let c = ZstdCodec::new(1);
+        assert_eq!(c.decode(ZSTD_CONCATENATED).unwrap(), zstd_plain());
+    }
+
+    #[test]
+    fn zstd_rejects_truncated_stream() {
+        let c = ZstdCodec::new(1);
+        let cut = &ZSTD_L3_FULL_NO_CHECKSUM[..ZSTD_L3_FULL_NO_CHECKSUM.len() - 20];
+        assert!(c.decode(cut).is_err());
+        assert!(c.decode(&[]).is_err());
+        assert!(c.decode(b"not a zstd stream").is_err());
+    }
+
+    #[test]
+    fn zstd_encode_is_level_1_only() {
+        assert!(matches!(
+            ZstdCodec::new(3).encode(b"abc"),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            ZstdCodec::new(19).encode(b"abc"),
+            Err(Error::Unsupported(_))
+        ));
+        // Decoding does not depend on the recorded level.
+        assert_eq!(
+            ZstdCodec::new(19).decode(ZSTD_L19_SECOND_HALF).unwrap(),
+            zstd_plain()[2000..]
+        );
+    }
+
+    #[test]
+    fn zstd_factory_validates_level() {
+        let r = super::super::Registry::builtin();
+        let dt = DType::FLOAT64;
+        assert!(r.build("zstd", &serde_json::json!({}), &dt).is_ok());
+        assert!(
+            r.build("zstd", &serde_json::json!({"level": 22}), &dt)
+                .is_ok()
+        );
+        assert!(
+            r.build("zstd", &serde_json::json!({"level": 23}), &dt)
+                .is_err()
+        );
+        assert!(
+            r.build("zstd", &serde_json::json!({"level": "x"}), &dt)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod zstd_checksum_tests {
+    use super::*;
+
+    #[test]
+    fn corrupted_content_checksum_is_rejected() {
+        // Stream written by the zstd CLI with a content checksum. Flipping the
+        // last byte changes only the 4-byte checksum trailer.
+        let good = include_bytes!("testdata/zstd_cli_l1_checksum_first_half.zst");
+        let codec = ZstdCodec::new(1);
+        assert!(codec.decode(good).is_ok());
+        let mut bad = good.to_vec();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xFF;
+        assert!(
+            codec.decode(&bad).is_err(),
+            "corrupted checksum was accepted"
+        );
     }
 }

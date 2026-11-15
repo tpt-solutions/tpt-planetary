@@ -112,6 +112,7 @@ impl Registry {
         r.register("gzip", compress::gzip_factory);
         r.register("zlib", compress::zlib_factory);
         r.register("lz4", compress::lz4_factory);
+        r.register("zstd", compress::zstd_factory);
         r.register("shuffle", filters::shuffle_factory);
         r.register("delta", filters::delta_factory);
         r
@@ -184,7 +185,9 @@ mod tests {
             r.build("gzip", &json!({"level": 1}), &DType::FLOAT64)
                 .is_ok()
         );
-        assert!(r.build("zstd", &json!({}), &DType::FLOAT64).is_err());
+        assert!(r.build("zstd", &json!({}), &DType::FLOAT64).is_ok());
+        assert!(r.build("bogus", &json!({}), &DType::FLOAT64).is_err());
+        assert!(r.contains("zstd"));
         assert!(r.contains("shuffle"));
     }
 }

@@ -16,10 +16,18 @@ categories = ["science", "data-structures"]
 default = ["std"]
 # Enables the in-memory and local-filesystem stores and std::error integration.
 std = []
+# Vectorised elementwise and reduction kernels via tpt-simd-vector (MIT OR Apache-2.0,
+# rust-version 1.95). Off by default; the scalar code is the reference.
+simd = ["dep:tpt-simd-vector"]
 
 [dependencies]
 # Pure-Rust DEFLATE/zlib (MIT OR Zlib OR Apache-2.0), rust-version not declared upstream; builds on the workspace MSRV.
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# Fixed-width SIMD vector type for the `simd` feature (MIT OR Apache-2.0, rust-version 1.95), no_std, forbid(unsafe).
+tpt-simd-vector = { version = "0.1.1", default-features = false, optional = true }
+# Pure-Rust Zstandard decoder and basic encoder (MIT, rust-version 1.87), no_std + alloc.
+# Default features off: the `hash` feature (content checksums) is not enabled.
+ruzstd = { version = "0.9.1", default-features = false, features = ["hash"] }
 # Pure-Rust LZ4 block format (MIT).
 lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
 # JSON for Zarr metadata (MIT OR Apache-2.0).

@@ -457,6 +457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -547,7 +556,9 @@ dependencies = [
  "divan",
  "lz4_flex",
  "miniz_oxide",
+ "ruzstd",
  "serde_json",
+ "tpt-simd-vector",
 ]
 
 [[package]]
@@ -588,6 +599,21 @@ dependencies = [
  "tpt-planetary-astro",
  "tpt-planetary-core",
 ]
+
+[[package]]
+name = "tpt-simd-vector"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "164ec4b9ee31f2748b89171ba15ccb7fe39ebda34182255ab3415cb41844ece0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "unicode-ident"
