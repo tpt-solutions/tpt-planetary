@@ -10,12 +10,16 @@
 //! - `pm`: `xp_arcsec yp_arcsec` -> the nine elements of the polar-motion
 //!   matrix `W` (ITRS -> TIRS, row-major), with s' = 0.
 //! - `esd`: `tt_hi tt_lo` -> low-precision Earth-Sun distance in AU.
+//! - `prec`: `t` (Julian centuries of TT from J2000) -> `zeta_A z_A theta_A`
+//!   in arcseconds, then the nine elements of the IAU 2006 precession matrix
+//!   `P(t)` (row-major, precession only).
 
 use std::io::{self, BufRead, Write};
 
 use tpt_planetary_astro::eop::ARCSEC_TO_RAD;
 use tpt_planetary_astro::ephemeris::earth_sun_distance_au_approx;
 use tpt_planetary_astro::frames::{Icrs, MeanEcliptic, SkyCoord, polar_motion_matrix};
+use tpt_planetary_astro::precession;
 use tpt_planetary_astro::time;
 
 fn parse_fields(line: &str, n: usize) -> Option<Vec<f64>> {
@@ -57,6 +61,14 @@ fn main() {
             "esd" => {
                 parse_fields(&line, 2).map(|v| earth_sun_distance_au_approx(v[0], v[1]).to_string())
             }
+            "prec" => parse_fields(&line, 1).map(|v| {
+                let t = v[0];
+                let (zeta, z, theta) = precession::precession_angles_arcsec(t);
+                let p = precession::precession_matrix(t);
+                let mut fields = vec![zeta.to_string(), z.to_string(), theta.to_string()];
+                fields.extend(p.iter().flatten().map(f64::to_string));
+                fields.join(" ")
+            }),
             _ => None,
         };
         match result {

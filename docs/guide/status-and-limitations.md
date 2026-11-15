@@ -58,8 +58,10 @@ None of the four milestones in `todo.md` is met yet.
   J2000 equinox. It is not the mean ecliptic of date. A rename or a fix is
   open.
 - True ecliptic takes a caller-supplied obliquity.
-- No precession, nutation, aberration, proper motion, ITRS, polar motion, or
-  CIRS/TIRS transforms. FK5 and FK4 are not implemented.
+- IAU 2006 precession is available as `tpt_planetary_astro::precession` (angles
+  and matrix, no nutation, no frame bias). There is no nutation, equation of the
+  equinoxes, aberration, proper motion, ITRS, polar motion, or CIRS/TIRS
+  transform. FK5 and FK4 are not implemented.
 - No UT1 time scale type. `EopTable` interpolates UT1-UTC and polar motion
   from parsed `finals2000A` records, but no EOP data file is bundled and the
   column map is unverified (see above).

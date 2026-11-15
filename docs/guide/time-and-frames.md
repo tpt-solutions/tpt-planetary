@@ -165,8 +165,9 @@ Known gaps in the frame layer:
 - The "ICRS to ecliptic at epoch" helper rotates by the epoch obliquity but
   keeps the J2000 equinox, so it is not the mean ecliptic of date. Its name is
   on the open list.
-- Precession, nutation, aberration, proper motion, ITRS and polar motion are
-  not implemented. The geodetic observer has no polar motion, and its height
+- IAU 2006 precession (`tpt_planetary_astro::precession`) is implemented as a
+  mean-equator-of-date transform with no nutation and no frame bias. Nutation,
+  aberration, proper motion, ITRS and polar motion are not implemented. The geodetic observer has no polar motion, and its height
   is ignored.
 - The polar-motion sign convention has not been checked against a reference.
 

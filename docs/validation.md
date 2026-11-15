@@ -10,7 +10,7 @@ beyond that, and they are not a claim about the full algorithms.
 
 | Package | Version | Used for |
 | --- | --- | --- |
-| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00` |
+| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00`, `erfa.p06e` |
 | astropy | 8.0.2 | `LeapSeconds.from_iers_leap_seconds` (bundled list, read offline), `SkyCoord` (ICRS, Galactic, `BarycentricMeanEcliptic`, `GeocentricMeanEcliptic`), `astropy.wcs.WCS` (wcslib) |
 | numpy | 2.5.4 | sampling and vector arithmetic |
 
@@ -43,9 +43,15 @@ passing, so the status cannot drift silently.
 | WCS AIT, dec0 = -60, LONPOLE default 180 | same | 2000 pixels (1244 inside the domain); 2000 sky points | pix -> world 1.4e-13 deg; world -> pix 2.0e-13 px (edge points excluded) | 1e-9 deg; 1e-6 px | pass (after fix) |
 | Polar-motion matrix W (ITRS -> TIRS), s' = 0 | `erfa.pom00` (pyerfa 2.0.1.5), transposed (ERFA documents `pom00` as TIRS -> ITRS) | 205 (xp, yp) points in arcsec: 5 fixed with both signs, 200 seeded random in [-1, 1] | 0.0 against the transpose; 9.7e-6 without it | 1e-12; untransposed must differ by more than 1e-6 | pass |
 | Earth-Sun distance, `earth_sun_distance_au_approx` (Meeus low-precision series) | `erfa.epv00` (pyerfa 2.0.1.5), norm of the heliocentric Earth position | 200 TT epochs, 1900-01-01 to 2100-01-01 | 9.99e-5 AU (14 951 km); mean 2.8e-5 AU (4 144 km) | 1e-4 AU (the helper's stated accuracy) | pass (margin 0.06%) |
+| IAU 2006 precession angles zeta_A, z_A, theta_A (precession only) | `erfa.p06e` (pyerfa 2.0.1.5), elements 9-11 | 200 TT epochs, 1900-01-01 to 2100-01-01 | 2.3e-13 arcsec | 1e-6 arcsec (1 microarcsecond) | pass |
+| IAU 2006 precession matrix P(t) = R3(-z_A) R2(theta_A) R3(-zeta_A) | same rotation chain built from `erfa.p06e` angles | same 200 epochs | 1.1e-16 | 1e-12 | pass |
+| IAU 2006 precession matrix P(t) vs ERFA precession matrix | `erfa.bp06` (pyerfa 2.0.1.5), `rp` | same 200 epochs | 2.4e-12, at the 2100 end | 5e-12 (widened after measuring, see findings) | pass |
+| Precession matrix convention (not transposed) | `erfa.bp06` `rp` | 1900 and 2100 ends | transposed P differs from `rp` by 4.5e-2 (guard requires > 1e-3) | > 1e-3 | pass |
 
 Polar motion and Earth-Sun use `validation_dump` modes `pm` and `esd`, and their
 tests are in `bindings/tpt-planetary-py/tests/validation/test_earth_orientation.py`.
+Precession uses mode `prec` and the tests are in
+`bindings/tpt-planetary-py/tests/validation/test_precession.py`.
 
 ### Findings
 
@@ -91,6 +97,17 @@ tests are in `bindings/tpt-planetary-py/tests/validation/test_earth_orientation.
   agrees with `erfa.epv00` to 9.99e-5 AU over 1900-2100. This is inside the
   1e-4 AU the crate documents, with a small margin. The SPK-based
   `earth_sun_distance_km` is not covered by this check.
+- **IAU 2006 precession (validated, precession only).** The angles match
+  `erfa.p06e` to 2.3e-13 arcsec. The constant offsets are part of the model:
+  zeta_A(0) = +2.650545 arcsec and z_A(0) = -2.650545 arcsec, so the angles are
+  not zero at J2000 even though P(0) is the identity. The matrix equals the
+  rotation chain built from ERFA's own angles to 1.1e-16. Against `erfa.bp06`
+  `rp` the residual is 2.4e-12 at the 2100 end (about 0.5 microarcsecond), and
+  it is near 1e-14 at J2000. `bp06` builds `rp` from the Fukushima-Williams
+  angles, which are a different parameterisation of the same model. The
+  1e-12 bound was set before measuring. The `bp06` comparison was widened to
+  5e-12 after the 2.4e-12 result, and the 1e-12 construction test stays strict.
+  Frame bias is not included on either side.
 - **Galactic.** The 0.025 arcsec difference is inside the bound from the
   published constants: each of the three constants (pole RA and Dec, node) is
   rounded to 5 decimals, up to 18 mas each, and the ICRS and FK5-J2000 pole
@@ -104,7 +121,12 @@ tests are in `bindings/tpt-planetary-py/tests/validation/test_earth_orientation.
 - **Nutation, GAST and true-of-date ecliptic.** Nutation is not implemented, so
   the equation of the equinoxes and the true obliquity are not checked. GAST is
   not compared.
-- **Precession.** Not implemented and not compared.
+- **Precession beyond zeta_A, z_A, theta_A and P(t).** The Fukushima-Williams
+  angles (`erfa.pfw06`) and the frame-bias-included matrix (`erfa.pmat06`) are
+  not compared. Precession was validated only in the bias-free form.
+- **Nutation and the equation of the equinoxes.** Not implemented and not
+  compared. Nutation is not part of the precession work. The true-of-date
+  equator, the true obliquity and GAST with nutation are therefore unchecked.
 - **Earth orientation.** The polar-motion matrix is compared only with s' = 0,
   because the crate omits s'. UT1-UTC and the `finals2000A` interpolation are
   not compared with IERS data. The `finals2000A` parser is checked against the

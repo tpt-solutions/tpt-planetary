@@ -136,13 +136,13 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [ ] UT1 and Earth Orientation Parameters (IERS Bulletin A/B/C04 parsing; bundled snapshot + user-supplied data) — PARTIAL: finals2000A parser with a column map from memory; no bundled snapshot; no UT1 scale type
 - [ ] TDB <-> TT (Fairhead & Bretagnon series, high precision) — PARTIAL: leading 3 terms in astro; full series open
 - [x] Earth Rotation Angle, GMST, GAST
-- [ ] Validate against SOFA/ERFA published vectors and Astropy outputs (as test data only) — PARTIAL: checked against pyerfa 2.0.1.5 and astropy 8.0.2 (see docs/validation.md): leap steps, ERA, GMST, obliquity, ICRS-Galactic and WCS pass; TT-TDB differs by up to 14.9 us (3-term series); SPK, nutation and precession not validated
+- [ ] Validate against SOFA/ERFA published vectors and Astropy outputs (as test data only) — PARTIAL: checked against pyerfa 2.0.1.5 and astropy 8.0.2 (see docs/validation.md): leap steps, ERA, GMST, obliquity, ICRS-Galactic and WCS pass; TT-TDB differs by up to 14.9 us (3-term series); SPK and nutation not validated; IAU 2006 precession validated against pyerfa (see docs/validation.md)
 
 ### Coordinate frames
 - [x] Frame trait / transformation graph (typed frames, attributes such as obstime/location)
 - [x] ICRS <-> Galactic
 - [ ] ICRS <-> Ecliptic (mean and true) — PARTIAL: mean ecliptic only; true ecliptic partial
-- [ ] IAU 2006 precession and IAU 2000A/B nutation
+- [ ] IAU 2006 precession and IAU 2000A/B nutation — PARTIAL: IAU 2006 precession (zeta_A, z_A, theta_A and P(t)) is implemented in `tpt-planetary-astro/src/precession.rs` and validated against pyerfa `p06e`/`bp06`. Nutation (IAU 2000A/B) and the equation of the equinoxes are NOT implemented and remain open.
 - [ ] Aberration, light deflection (optional), proper motion & parallax propagation
 - [ ] Observer location (geodetic/ITRS), polar motion — PARTIAL: geodetic observer only; no ITRS or polar motion
 - [ ] ICRS <-> CIRS <-> TIRS/ITRS
