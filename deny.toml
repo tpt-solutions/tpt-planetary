@@ -1,0 +1,63 @@
+# cargo-deny configuration: licence, ban, advisory and source policy.
+# Run with: cargo deny check
+#
+# Policy summary (see spec.txt section 5 and docs/dependencies.md):
+# - Only permissive licences are allowed.
+# - Apache-2.0 is not on the allow list on its own. Crates that are dual
+#   licensed `MIT OR Apache-2.0` pass because the MIT alternative is allowed.
+#   Apache-2.0-only crates fail the check.
+# - GPL, LGPL, AGPL and MPL are denied outright.
+# - C/FFI crates for HDF5, NetCDF, ERFA, zstd and zlib are banned.
+
+[graph]
+all-features = true
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "ISC",
+]
+# Licences not on the allow list (GPL, LGPL, AGPL, MPL, Apache-2.0-only, ...)
+# are rejected by default. cargo-deny 0.20 removed the old `deny` and
+# `copyleft` keys, so no explicit deny list is needed here.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+# One entry per banned crate. Each `name` must be its own table.
+[[bans.deny]]
+name = "hdf5-sys"    # C FFI, complex build requirements
+
+[[bans.deny]]
+name = "netcdf-sys"  # C FFI
+
+[[bans.deny]]
+name = "erfa-sys"    # C FFI (ERFA is banned by policy, even if re-licensed)
+
+[[bans.deny]]
+name = "cffi"        # Python FFI
+
+[[bans.deny]]
+name = "zstd-sys"    # C FFI; use the pure-Rust `ruzstd` instead
+
+[[bans.deny]]
+name = "libz-sys"    # C FFI; use `miniz_oxide` instead
+
+[[bans.deny]]
+name = "bindgen"     # Generates C bindings; no bindgen-based wrappers allowed
+
+[advisories]
+unmaintained = "workspace"
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

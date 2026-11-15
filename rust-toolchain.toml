@@ -1,0 +1,7 @@
+[toolchain]
+# MSRV is 1.85 (edition 2024; required by tpt-math and glam).
+# tpt-simd needs Rust 1.95 and is only pulled in from Phase 3 onward;
+# revisit the MSRV decision when that happens (see docs/dependencies.md).
+channel = "1.85.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

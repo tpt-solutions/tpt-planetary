@@ -1,0 +1,8 @@
+# Normalise text files to LF in the repository.
+* text=auto eol=lf
+
+# Binary data files
+*.bsp binary
+*.nc binary
+*.h5 binary
+*.hdf5 binary

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "tpt-planetary-core",
+    "tpt-planetary-array",
+    "tpt-planetary-astro",
+    "tpt-planetary-cli",
+    "bindings/tpt-planetary-py",
+]
+# The cargo-fuzz crate builds with its own lockfile and libFuzzer runtime.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-planetary"
+homepage = "https://github.com/tpt-solutions/tpt-planetary"
+readme = "README.md"
+
+[workspace.dependencies]
+# Internal crates
+tpt-planetary-core = { version = "0.1.0", path = "tpt-planetary-core", default-features = false }
+tpt-planetary-array = { version = "0.1.0", path = "tpt-planetary-array" }
+tpt-planetary-astro = { version = "0.1.0", path = "tpt-planetary-astro" }
+
+# Pinned external dependencies (each audited, see docs/dependencies.md)
+tpt-math = "0.1.0"
+glam = { version = "0.34", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

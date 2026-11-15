@@ -30,3 +30,7 @@ Thumbs.db
 
 # Env
 .env
+
+# Build and test artefacts
+*.pdb
+.pytest_cache/
