@@ -1,0 +1,41 @@
+[package]
+name = "tpt-planetary-fuzz"
+version = "0.0.0"
+description = "cargo-fuzz targets for tpt-planetary parsers (not part of the workspace)"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+# Standalone workspace: this crate is excluded from the root workspace.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# libFuzzer runtime wrapper (MIT OR Apache-2.0 AND NCSA; rust-version not declared).
+libfuzzer-sys = "0.4.13"
+tpt-planetary-array = { path = "../tpt-planetary-array" }
+tpt-planetary-astro = { path = "../tpt-planetary-astro" }
+
+[[bin]]
+name = "netcdf3_reader"
+path = "fuzz_targets/netcdf3_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zarr_v2_metadata"
+path = "fuzz_targets/zarr_v2_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wcs_header"
+path = "fuzz_targets/wcs_header.rs"
+test = false
+doc = false
+bench = false
