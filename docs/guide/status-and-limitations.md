@@ -59,9 +59,17 @@ None of the four milestones in `todo.md` is met yet.
   open.
 - True ecliptic takes a caller-supplied obliquity.
 - IAU 2006 precession is available as `tpt_planetary_astro::precession` (angles
-  and matrix, no nutation, no frame bias). There is no nutation, equation of the
-  equinoxes, aberration, proper motion, ITRS, polar motion, or CIRS/TIRS
-  transform. FK5 and FK4 are not implemented.
+  and matrix, no frame bias). IAU 2000A_R06 nutation is available as
+  `tpt_planetary_astro::nutation`: the full luni-solar and planetary series in
+  longitude and obliquity, the nutation matrix, and the classical equation of the
+  equinoxes `dpsi cos(eps0)`. Limits: no IAU 2000B, no complementary terms of the
+  equation of the origins (up to 2.65 mas in GAST), no s', no CIP or CIO, and no
+  frame bias. There is no aberration, proper motion, ITRS, polar motion, or
+  CIRS/TIRS transform. FK5 and FK4 are not implemented.
+- The nutation series follow the published IERS Conventions (2010) tables,
+  which include the time-varying out-of-phase amplitudes. ERFA's `nut06a` omits
+  them, so the two differ by up to 5.3 uas in dpsi over 1900-2100. The difference
+  is documented in `docs/validation.md`.
 - No UT1 time scale type. `EopTable` interpolates UT1-UTC and polar motion
   from parsed `finals2000A` records, but no EOP data file is bundled and the
   column map is unverified (see above).
