@@ -1,0 +1,37 @@
+[package]
+name = "tpt-planetary-array"
+description = "Chunked N-D arrays, Zarr and lazy evaluation for tpt-planetary (NetCDF/HDF5 replacement)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["zarr", "ndarray", "netcdf", "chunked", "climate"]
+categories = ["science", "data-structures"]
+
+[features]
+default = ["std"]
+# Enables the in-memory and local-filesystem stores and std::error integration.
+std = []
+
+[dependencies]
+# Pure-Rust DEFLATE/zlib (MIT OR Zlib OR Apache-2.0), rust-version not declared upstream; builds on 1.85.
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# Pure-Rust LZ4 block format (MIT).
+lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
+# JSON for Zarr metadata (MIT OR Apache-2.0).
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Benchmark harness (MIT OR Apache-2.0, rust-version 1.80).
+divan = { version = "0.1.21", default-features = false }
+
+[[bench]]
+name = "array"
+harness = false
