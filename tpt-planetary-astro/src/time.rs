@@ -126,13 +126,28 @@ pub fn gmst_iau2006(ut1_hi: f64, ut1_lo: f64, tt_hi: f64, tt_lo: f64) -> f64 {
 /// Greenwich Apparent Sidereal Time in radians, in `[0, 2*pi)`.
 ///
 /// `GAST = GMST + equation of the equinoxes`, where the equation of the
-/// equinoxes is approximated by `dpsi * cos(eps)`. `dpsi` is the nutation in
-/// longitude and `eps` the mean obliquity, both in radians, and must come from
-/// a nutation model supplied by the caller. The complementary terms of the
-/// equation of the origins are omitted.
+/// equinoxes is `dpsi * cos(eps)`. `dpsi` is the nutation in longitude and
+/// `eps` the mean obliquity, both in radians, and must come from a nutation
+/// model supplied by the caller. The complementary terms of the equation of the
+/// origins are omitted. For a self-contained computation from the time alone,
+/// use [`gast_iau2006`].
 #[must_use]
 pub fn gast(gmst_rad: f64, dpsi_rad: f64, mean_obliquity_rad: f64) -> f64 {
     wrap_two_pi(gmst_rad + dpsi_rad * mean_obliquity_rad.cos())
+}
+
+/// Greenwich Apparent Sidereal Time in radians, in `[0, 2*pi)`, computed from
+/// UT1 and TT with the IAU 2000A_R06 nutation of [`crate::nutation`].
+///
+/// `GAST = GMST_IAU2006 + equation of the equinoxes`, where the equation of the
+/// equinoxes is [`crate::nutation::equation_of_equinoxes`] (`dpsi * cos(eps0)`).
+/// The complementary terms are omitted, so this differs from the full
+/// equation of the origins by the size quantified in `docs/validation.md`.
+/// Polar motion and the TIO locator are not applied.
+#[must_use]
+pub fn gast_iau2006(ut1_hi: f64, ut1_lo: f64, tt_hi: f64, tt_lo: f64) -> f64 {
+    let gmst = gmst_iau2006(ut1_hi, ut1_lo, tt_hi, tt_lo);
+    wrap_two_pi(gmst + crate::nutation::equation_of_equinoxes(tt_hi, tt_lo))
 }
 
 /// Mean obliquity of the ecliptic at J2000.0, in arcseconds (IAU 2006).
@@ -261,6 +276,19 @@ mod tests {
         let seconds = gmst.to_degrees() / 15.0 * 3600.0;
         let expected = 18.0 * 3600.0 + 41.0 * 60.0 + 50.5;
         assert!((seconds - expected).abs() < 0.5, "got {seconds} s");
+    }
+
+    #[test]
+    fn gast_iau2006_is_gmst_plus_equation_of_equinoxes() {
+        let (ut1_hi, ut1_lo) = (2_460_000.5, 0.25);
+        let (tt_hi, tt_lo) = (2_460_000.5, 0.25 + 69.184 / SECONDS_PER_DAY);
+        let gmst = gmst_iau2006(ut1_hi, ut1_lo, tt_hi, tt_lo);
+        let ee = crate::nutation::equation_of_equinoxes(tt_hi, tt_lo);
+        let expected = wrap_two_pi(gmst + ee);
+        let got = gast_iau2006(ut1_hi, ut1_lo, tt_hi, tt_lo);
+        assert!((got - expected).abs() < EPS);
+        // The equation of the equinoxes is at most about 18 arcseconds in magnitude.
+        assert!(ee.abs() < 20.0 * RAD_PER_ARCSEC);
     }
 
     #[test]

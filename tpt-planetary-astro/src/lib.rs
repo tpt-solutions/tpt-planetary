@@ -9,8 +9,11 @@
 //!   GAST. Needs `std` for the trigonometric functions.
 //! - [`frames`]: typed sky coordinates, ICRS/Galactic/ecliptic transforms, and
 //!   Alt/Az. Needs `std`.
-//! - [`precession`]: IAU 2006 precession angles and matrix (no nutation, no
-//!   frame bias). The angles need no `std`; the matrix needs `std`.
+//! - [`precession`]: IAU 2006 precession angles and matrix (no frame bias).
+//!   The angles need no `std`; the matrix needs `std`.
+//! - [`nutation`]: IAU 2000A_R06 nutation (full series), the nutation matrix,
+//!   and the classical equation of the equinoxes. The fundamental arguments
+//!   and table data need no `std`; the series and matrix need `std`.
 //! - [`wcs`]: FITS WCS header parsing and TAN/SIN/AIT projections. Needs `std`.
 //!
 //! Feature flags:
@@ -25,8 +28,15 @@
 #![forbid(unsafe_code)]
 
 pub mod eop;
+#[cfg(all(test, not(feature = "std")))]
+extern crate alloc;
+
 pub mod ephemeris;
+pub mod nutation;
 pub mod precession;
+
+#[cfg(feature = "std")]
+mod nutation_data;
 
 #[cfg(feature = "std")]
 pub mod frames;

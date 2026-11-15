@@ -1,10 +1,10 @@
 //! IAU 2006 precession of the equator and equinox (Capitaine, Wallace &
 //! Chapront 2003; adopted by IAU 2006 Resolution B1).
 //!
-//! This module covers **precession only**. It does not implement nutation,
-//! the equation of the equinoxes, the celestial intermediate origin or the
-//! TIO locator s', and it does not apply the ICRS -> J2000 frame bias
-//! (about 17 mas in the equator). The matrix returned here maps the mean
+//! This module covers **precession only**. Nutation and the equation of the
+//! equinoxes are in [`crate::nutation`]. This module does not implement the
+//! celestial intermediate origin or the TIO locator s', and it does not apply
+//! the ICRS -> J2000 frame bias (about 17 mas in the equator). The matrix returned here maps the mean
 //! equator and equinox of J2000.0 to the mean equator and equinox of date.
 //! Treating ICRS axes as the J2000 mean equator is the bias-free convention
 //! used by [`icrs_to_mean_equator_of_date`].
@@ -35,8 +35,7 @@
 //!
 //! Checked against `erfa.p06e` (zeta, z, theta) and against the precession
 //! matrix from `erfa.bp06` (pyerfa 2.0.1.5) over 1900-2100. See
-//! `docs/validation.md`. Nutation is not validated because it is not
-//! implemented.
+//! `docs/validation.md`. Nutation is validated in [`crate::nutation`].
 
 use core::f64::consts::PI;
 
@@ -125,7 +124,7 @@ pub fn precession_angles_rad(t: f64) -> (f64, f64, f64) {
 }
 
 #[cfg(feature = "std")]
-mod matrix_impl {
+pub(crate) mod matrix_impl {
     use super::precession_angles_rad;
     use crate::frames::{Frame, Icrs, SkyCoord};
 
@@ -143,7 +142,7 @@ mod matrix_impl {
         const NAME: &'static str = "MeanEquatorOfDate(IAU2006, no nutation)";
     }
 
-    fn mat_mul(a: &Matrix3, b: &Matrix3) -> Matrix3 {
+    pub(crate) fn mat_mul(a: &Matrix3, b: &Matrix3) -> Matrix3 {
         let mut out = [[0.0; 3]; 3];
         for (i, row) in out.iter_mut().enumerate() {
             for (j, cell) in row.iter_mut().enumerate() {
@@ -153,7 +152,7 @@ mod matrix_impl {
         out
     }
 
-    fn mat_vec(m: &Matrix3, v: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn mat_vec(m: &Matrix3, v: [f64; 3]) -> [f64; 3] {
         [
             m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
             m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
@@ -272,7 +271,7 @@ mod matrix_impl {
     /// Applies a 3x3 rotation to the unit vector of `(lon, lat)` and returns the
     /// direction in the target frame. The result is a unit vector, so the
     /// longitude and latitude are recovered directly.
-    fn rotate_direction<T: Frame>(m: &Matrix3, lon: f64, lat: f64) -> SkyCoord<T> {
+    pub(crate) fn rotate_direction<T: Frame>(m: &Matrix3, lon: f64, lat: f64) -> SkyCoord<T> {
         let (sl, cl) = lon.sin_cos();
         let (sb, cb) = lat.sin_cos();
         let v = mat_vec(m, [cb * cl, cb * sl, sb]);
