@@ -16,8 +16,8 @@
 //!   and are deliberately deferred.
 //! - Validation: the tests check analytic identities (the reference pixel maps
 //!   to CRVAL, the TAN and SIN great-circle distance from CRVAL, the AIT edge
-//!   position) and round trips. They do not compare against wcslib or Astropy
-//!   output, so agreement with those libraries is not claimed.
+//!   position) and round trips. Agreement with wcslib (via Astropy) is checked
+//!   in the Python validation suite; see `docs/validation.md`.
 
 use core::f64::consts::{PI, TAU};
 use core::fmt;
@@ -108,12 +108,17 @@ impl Projection {
                 let xr = x / R2D;
                 let yr = y / R2D;
                 let z2 = 1.0 - (xr / 4.0).powi(2) - (yr / 2.0).powi(2);
-                if z2 <= 0.0 {
+                // The Hammer domain is xr^2/8 + yr^2/2 <= 1, which is z2 >= 1/2.
+                // Native phi is in (-pi, pi], so cos(theta) cos(phi/2) = 2 z2 - 1
+                // must be non-negative; a smaller value lies outside the domain.
+                // A small tolerance keeps points exactly on the edge in the domain.
+                let cy = 2.0 * z2 - 1.0;
+                if cy < -1e-12 {
                     return None;
                 }
                 let z = z2.sqrt();
                 // cos(theta) sin(phi/2) = xr z / 2 and cos(theta) cos(phi/2) = 2 z^2 - 1.
-                let (cx, cy) = (xr * z / 2.0, 2.0 * z2 - 1.0);
+                let cx = xr * z / 2.0;
                 let theta = (yr * z).atan2(cx.hypot(cy));
                 let phi = 2.0 * cx.atan2(cy);
                 Some((phi, theta))
@@ -600,6 +605,26 @@ mod tests {
         let (ra, dec) = w.pixel_to_world(100.5 + edge, 50.5).expect("domain");
         assert!((ra - 180.0).abs() < 1e-8, "ra={ra}");
         assert!(dec.abs() < 1e-8, "dec={dec}");
+    }
+
+    #[test]
+    fn ait_inverse_rejects_pixels_outside_hammer_ellipse() {
+        // Regression: the inverse used the ellipse x^2/16 + y^2/4 <= 1 (semi-axes
+        // 4 and 2 rad), so pixels between the true edge (2*sqrt(2) rad) and 4 rad
+        // were mapped to sky positions that project back to other pixels.
+        // Reference: astropy.wcs (wcslib) returns NaN for these pixels.
+        let w = Wcs::new(params(Projection::Ait, [0.0, 0.0], identity_cd(1.0))).expect("wcs");
+        let x_out_deg = 170.0; // 2.967 rad > 2*sqrt(2) rad
+        assert!(w.pixel_to_world(100.5 + x_out_deg, 50.5).is_none());
+        let y_out_deg = 100.0; // 1.745 rad: y^2/2 > 1
+        assert!(w.pixel_to_world(100.5, 50.5 + y_out_deg).is_none());
+        // Points just inside the edge still map and round-trip.
+        let (lon, lat) = w.pixel_to_world(100.5 + 160.0, 50.5).expect("inside");
+        let (px, py) = w.world_to_pixel(lon, lat).expect("forward");
+        assert!((px - (100.5 + 160.0)).abs() < 1e-8 && (py - 50.5).abs() < 1e-8);
+        let (lon, lat) = w.pixel_to_world(100.5, 50.5 + 80.0).expect("inside");
+        let (px, py) = w.world_to_pixel(lon, lat).expect("forward");
+        assert!((px - 100.5).abs() < 1e-8 && (py - (50.5 + 80.0)).abs() < 1e-8);
     }
 
     #[test]

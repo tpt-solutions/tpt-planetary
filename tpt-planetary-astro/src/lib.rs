@@ -16,8 +16,8 @@
 //!
 //! Status: see the crate README and the Phase 2 and 3 checklist in the
 //! workspace `todo.md`. Numerical claims are limited to what the unit tests
-//! check; no comparison against SOFA/ERFA, JPL Horizons, Astropy or wcslib
-//! reference values is made in this crate.
+//! check. Comparisons against ERFA, Astropy and wcslib are in the Python
+//! validation suite; see `docs/validation.md` for results and open gaps.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
