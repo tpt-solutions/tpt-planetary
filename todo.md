@@ -95,7 +95,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 
 ### tpt-planetary-array: compression (pure Rust)
 - [x] Codec trait + registry
-- [ ] zstd decode/encode via pure-Rust crate (decide on `ruzstd` and its encoder limits)
+- [x] zstd decode/encode via pure-Rust crate (decide on `ruzstd` and its encoder limits) — PARTIAL: decode verified (checksums too); encode at level 1 only; ruzstd 0.9.1 (MIT)
 - [x] gzip/zlib via `miniz_oxide` / `flate2` (pure-Rust backend only)
 - [x] LZ4 via `lz4_flex`
 - [ ] Blosc-compatible decoding (pure Rust; evaluate need)
@@ -170,10 +170,10 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 ## Phase 3: Advanced Compute & WCS (Months 7-9)
 
 ### Map algebra (tpt-simd)
-- [ ] Integrate `tpt-simd` into `tpt-planetary-array`
-- [ ] Vectorised elementwise ops (+, -, *, /, pow, abs, sqrt, exp, log, trig) — PARTIAL: scalar code only; no SIMD, tpt-simd is blocked by its Rust 1.95 requirement
+- [x] Integrate `tpt-simd` into `tpt-planetary-array` — via the optional `simd` feature (tpt-simd-vector, not the umbrella crate); no measured speedup on this machine
+- [ ] Vectorised elementwise ops (+, -, *, /, pow, abs, sqrt, exp, log, trig) — PARTIAL: add, sub, mul, div, abs and sqrt are vectorised under the simd feature; pow, exp, log, trig and comparisons are scalar only
 - [x] Vectorised comparisons, masks, `where`/select
-- [ ] SIMD reductions (sum, mean, min, max, std) with scalar fallbacks — PARTIAL: scalar reductions only
+- [ ] SIMD reductions (sum, mean, min, max, std) with scalar fallbacks — PARTIAL: full-array sum, mean, min and max are vectorised under the simd feature; per-axis reductions are scalar
 - [x] Broadcasting rules (N-D)
 - [ ] Axis-wise reductions and group-by style aggregations (e.g. monthly climatology) — PARTIAL: axis reductions done; monthly climatology group-by not done
 - [x] Rolling/window ops and resampling along time
@@ -277,5 +277,5 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] Check `FINALS2000A_COLUMNS` in `tpt-planetary-astro/src/eop.rs` against the IERS finals2000A readme. The column positions were written from memory. (Checked against the readme column table, retrieved 2026-11-16: all columns matched except the LOD flag at column 79, which is blank in the readme; the flag was removed and `parses_readme_layout_line` covers it. No data file was parsed.)
 - [ ] Rename or fix `icrs_to_ecliptic_at_epoch` in `tpt-planetary-astro/src/frames.rs`. It rotates by the epoch obliquity but keeps the J2000 equinox, so it is not the mean ecliptic of date.
 - [ ] Check the W = R2(xp) R1(yp) polar-motion sign convention in astro against a reference. — PARTIAL: sign and axis order confirmed against `erfa.pom00` with s' = 0 (W equals its transpose to double precision; ERFA documents pom00 as TIRS -> ITRS). The TIO locator s' is still omitted (about 5.9e-11 rad at 2026), so the full IAU 2000 matrix is not matched.
-- [ ] **Licence decision:** `cargo deny check` fails on `target-lexicon` 0.13.6 (Apache-2.0 WITH LLVM-exception, a build-time dependency of PyO3). The spec bans Apache-2.0-only licences. Options: a narrowly scoped `deny.toml` exception with a written rationale, or a different policy. Not changed without your decision.
+- [x] **Licence decision (resolved):** `cargo deny check` fails on `target-lexicon` 0.13.6 (Apache-2.0 WITH LLVM-exception, a build-time dependency of PyO3). The spec bans Apache-2.0-only licences. Options: a narrowly scoped `deny.toml` exception with a written rationale, or a different policy. Not changed without your decision. RESOLVED 2026-11-16: target-lexicon is patched with the MIT-licensed substitute at ../target-lexicon-mit; cargo deny passes. CI needs that path or a published substitute.
 - [ ] Library bugs fixed in this pass, with the remaining gaps: `to_calendar` and `Epoch::to_civil` now return `Result` and reject |day| > 5e11 (a 1e12 limit overflowed the i32 year). Array chunk geometry uses saturating multiplies; WCS longitude folds 360.0 to 0.0. Regression tests cover the calendar only; the array and WCS cases have no test yet.

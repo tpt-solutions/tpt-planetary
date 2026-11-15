@@ -21,14 +21,14 @@ records the reasoning behind each choice, which `deny.toml` cannot capture.
 |---|---|---|---|---|---|---|
 | `tpt-math` | 0.1.0 | MIT OR Apache-2.0 | 1.85 | **No.** Fails to build for `thumbv7em-none-eabihf`: it does not declare `#![no_std]` and requires `std`. | — (not yet used) | **Not adopted for `core`.** Use only from `std` crates until upstream adds `no_std`, or replace it in core. |
 | `glam` | 0.34 | MIT OR Apache-2.0 | 1.85 | Yes, with `default-features = false, features = ["libm"]` | core (planned) | Approved. Verified: builds for `thumbv7em-none-eabihf`. |
-| `tpt-simd` | 0.1.1 | MIT OR Apache-2.0 | **1.95** | Not checked (cannot build on MSRV 1.85) | array (Phase 3) | Licence OK. **Needs Rust 1.95**, above our MSRV. Adopting it means raising the MSRV, a decision for Phase 3. |
+| `tpt-simd-vector` | 0.1.1 | MIT OR Apache-2.0 | **1.95** | Yes (`#![no_std]`, `#![forbid(unsafe_code)]`). Built for `thumbv7em-none-eabihf` with `simd` on and off. | array, feature `simd` (Phase 3) | Adopted (see below). The umbrella `tpt-simd` is not used. |
 
 ## Phase 1 candidates (licence and MSRV checked; not yet added)
 
 | Crate | Version | Licence | MSRV | Notes |
 |---|---|---|---|---|
 | `object_store` | 0.14.2 | MIT/Apache-2.0 | 1.85 | Licence OK. Transitive dependencies still need a licence sweep before adoption. |
-| `ruzstd` | 0.9.1 | MIT | **1.87** | Licence OK, but its MSRV is above 1.85. Decide whether to raise the MSRV or pin an older release. |
+| `ruzstd` | 0.9.1 | MIT | **1.87** | Adopted (see below). |
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | not declared | Pure Rust deflate. Licence OK. |
 | `flate2` | 1.1.11 | MIT OR Apache-2.0 | 1.67 | Use only with the pure-Rust `miniz_oxide` backend. |
 | `lz4_flex` | 0.14.2 | MIT | 1.81 | Pure Rust LZ4. Licence OK. |
@@ -44,8 +44,8 @@ records the reasoning behind each choice, which `deny.toml` cannot capture.
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | none declared | Pure Rust DEFLATE/zlib. Builds on 1.85. Default features off, `with-alloc` on. |
 | `lz4_flex` | 0.14.2 | MIT | 1.81 | Pure Rust LZ4. `alloc`, `safe-encode`, `safe-decode`. |
 | `serde_json` | 1.0.154 | MIT OR Apache-2.0 | 1.71 | Zarr metadata. `alloc` only. Transitive: `serde_core`, `itoa`, `zmij` (MIT), `memchr` (Unlicense OR MIT), `adler2` (0BSD OR MIT OR Apache-2.0). |
-
-Not adopted: `ruzstd` (needs Rust 1.87, above MSRV).
+| `ruzstd` | 0.9.1 | MIT | 1.87 | Pure-Rust Zstandard. `default-features = false` with the `hash` feature only, which adds `twox-hash` 2.1.5 (MIT, MSRV 1.81); checksums are compared in our decode path because ruzstd does not compare them itself. `#![no_std]` with `alloc`; built for `thumbv7em-none-eabihf`. **Decoder:** RFC 8878 frames, multiple concatenated frames; tested against zstd CLI v1.5.7 output (levels 1, 3 and 19; checksummed and unchecksummed). **Content checksums are parsed but not verified** (the `hash` feature would add `twox-hash`, not adopted). **Encoder:** only `CompressionLevel::Fastest` ("roughly level 1") and `Uncompressed` work. `Default`, `Better` and `Best` call `unimplemented!()` and panic, so the codec rejects them before calling the encoder. Output of the encoder was checked by decoding it with zstd CLI v1.5.7 (4 KB and 300 KB inputs). Used by `codec::compress::ZstdCodec`, registry id `zstd`; no feature gate. |
+| `tpt-simd-vector` | 0.1.1 | MIT OR Apache-2.0 | 1.95 | Fixed-width array-backed `Simd<f64, 4>`. Its only dependency is `libm` 0.2.16 (MIT, MSRV 1.63), which is already in `Cargo.lock` through `glam`. `no_std`, `forbid(unsafe_code)`. Used behind feature `simd` (default **off**; the scalar path is the default and the reference). The lane operations are safe loops that LLVM may auto-vectorise; there are no intrinsics, so any speed-up depends on the compiler. Not adopted from the same family: `tpt-simd` (umbrella), `tpt-simd-reduce` (not needed: the kernels are written against `Simd` directly), `tpt-simd-math` (f32 only). |
 
 ## Adopted in `tpt-planetary-py` (Phase 4)
 
@@ -87,3 +87,11 @@ Not adopted: `ruzstd` (needs Rust 1.87, above MSRV).
   and `ruzstd` (1.87). The toolchain pin, CI MSRV job and fuzz crate follow it.
 - **`tpt-math` in `core`.** Not usable on `no_std` today. Either keep it out of
   `core`, or ask upstream for `#![no_std]`.
+- **ruzstd content checksums.** Verified in `ZstdCodec::decode` (stored versus recomputed XXH64 low 32 bits); covered by a corruption test.
+  Turning it on adds `twox-hash` (needs its own licence and MSRV entry). Decide
+  before zstd data is treated as integrity-checked.
+- **zstd write policy.** The encoder accepts only level 1 (Zarr default). Other
+  levels return `Unsupported` on write and still read. ruzstd has no level 3 or
+  higher encoder.
+- **`simd` default.** The `simd` feature is off by default. Turn it on only after
+  the benchmark shows a gain on the target platforms.
