@@ -12,9 +12,13 @@
 //! or NaN) propagate through operations and are skipped by NaN-aware
 //! reductions.
 //!
-//! This module is scalar only. Vectorised kernels are not implemented.
+//! The default build is scalar. With the `simd` feature, elementwise arithmetic
+//! and unary `abs`/`sqrt`, and full-array reductions, use `tpt-simd-vector`
+//! kernels (see `simd.rs`); the scalar code remains the reference.
 
 mod nd;
+#[cfg(feature = "simd")]
+pub(crate) mod simd;
 mod source;
 
 pub mod broadcast;

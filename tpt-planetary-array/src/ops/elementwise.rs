@@ -30,7 +30,7 @@ pub enum ArithOp {
 }
 
 impl ArithOp {
-    fn apply(self, a: f64, b: f64) -> f64 {
+    pub(crate) fn apply(self, a: f64, b: f64) -> f64 {
         match self {
             ArithOp::Add => a + b,
             ArithOp::Sub => a - b,
@@ -98,7 +98,7 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
-    fn apply(self, x: f64) -> f64 {
+    pub(crate) fn apply(self, x: f64) -> f64 {
         match self {
             // A sign test rather than `f64::abs`, which is not guaranteed to
             // be available in `core` on the MSRV. NaN propagates unchanged.
@@ -173,8 +173,27 @@ impl NodeOp for Arith {
         }
         let a = operand_block(&self.lhs, region, &self.shape)?;
         let b = operand_block(&self.rhs, region, &self.shape)?;
-        Ok(zip_blocks(&a, &b, |x, y| self.op.apply(x, y)))
+        let values = arith_values(self.op, &a.values, &b.values);
+        let valid = a
+            .valid
+            .iter()
+            .zip(&b.valid)
+            .map(|(&p, &q)| p && q)
+            .collect();
+        Ok(Block { values, valid })
     }
+}
+
+/// Applies `op` pointwise. With the `simd` feature, the vector kernel is used
+/// for operators that have one; otherwise the scalar loop runs.
+fn arith_values(op: ArithOp, a: &[f64], b: &[f64]) -> Vec<f64> {
+    #[cfg(feature = "simd")]
+    {
+        if let Some(values) = crate::ops::simd::arith(op, a, b) {
+            return values;
+        }
+    }
+    a.iter().zip(b).map(|(&x, &y)| op.apply(x, y)).collect()
 }
 
 #[derive(Debug)]
@@ -251,6 +270,13 @@ impl NodeOp for Unary {
 
     fn eval_region(&self, region: &Region) -> Result<Block> {
         let mut block = self.input.eval_region(region)?;
+        #[cfg(feature = "simd")]
+        {
+            if let Some(values) = crate::ops::simd::unary(self.op, &block.values) {
+                block.values = values;
+                return Ok(block);
+            }
+        }
         for v in &mut block.values {
             *v = self.op.apply(*v);
         }

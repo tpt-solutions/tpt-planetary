@@ -65,6 +65,17 @@ impl Acc {
         self.max = self.max.max(v);
     }
 
+    /// Pushes every value of `xs`, equivalent to calling [`Acc::push`] on each.
+    #[cfg(feature = "simd")]
+    fn push_slice(&mut self, xs: &[f64]) {
+        let s = crate::ops::simd::stats(xs);
+        self.has_nan |= s.has_nan;
+        self.count += s.count;
+        self.sum += s.sum;
+        self.min = self.min.min(s.min);
+        self.max = self.max.max(s.max);
+    }
+
     fn finish(&self, op: Reduction) -> f64 {
         if self.has_nan {
             return f64::NAN;
@@ -141,6 +152,24 @@ impl Expr {
         let mut acc = vec![Acc::EMPTY; element_count(&out_shape)];
         for region in BlockIter::new(&shape, options.block_elements) {
             let block = self.eval_region(&region)?;
+            #[cfg(feature = "simd")]
+            if acc.len() == 1 {
+                // Every element feeds the single output cell, so the block can
+                // be reduced as one slice.
+                if skip_invalid {
+                    let kept: Vec<f64> = block
+                        .values
+                        .iter()
+                        .zip(&block.valid)
+                        .filter(|(_, ok)| **ok)
+                        .map(|(&v, _)| v)
+                        .collect();
+                    acc[0].push_slice(&kept);
+                } else {
+                    acc[0].push_slice(&block.values);
+                }
+                continue;
+            }
             let mut i = 0usize;
             for_each_index(&region.count, |idx| {
                 let ok = block.valid[i];
@@ -318,5 +347,44 @@ mod tests {
         let r = e.reduce_axes(&[], Reduction::Sum, false).unwrap();
         assert_eq!(r.shape, shape);
         assert_eq!(r.values, values);
+    }
+
+    /// Full reductions over lengths that are not multiples of the vector width,
+    /// with NaN and fill-like holes, against a sequential reference.
+    #[test]
+    fn full_reduction_matches_sequential_reference() {
+        let mut state = 7u64;
+        for n in [1usize, 3, 4, 5, 6, 7, 9, 31, 1000] {
+            let values: Vec<f64> = (0..n)
+                .map(|i| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    if i % 9 == 4 {
+                        f64::NAN
+                    } else {
+                        ((state >> 11) as f64 / (1u64 << 53) as f64) * 10.0 - 5.0
+                    }
+                })
+                .collect();
+            let valid: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
+            let e = Expr::from_values(vec![n as u64], values.clone()).unwrap();
+            let sum: f64 = valid.iter().sum();
+            let min = valid.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = valid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+            let skip = e.reduce_axes(&[0], Reduction::Sum, true).unwrap();
+            assert!((skip.values[0] - sum).abs() < 1e-9, "n={n}");
+            let skip_min = e.reduce_axes(&[0], Reduction::Min, true).unwrap();
+            assert_eq!(skip_min.values[0], min, "n={n}");
+            let skip_max = e.reduce_axes(&[0], Reduction::Max, true).unwrap();
+            assert_eq!(skip_max.values[0], max, "n={n}");
+
+            // Without skipping, a single NaN makes the result NaN (index 4 holds one).
+            if n > 4 {
+                let prop = e.reduce_axes(&[0], Reduction::Sum, false).unwrap();
+                assert!(prop.values[0].is_nan(), "n={n}");
+            }
+        }
     }
 }

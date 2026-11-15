@@ -66,6 +66,17 @@ fn lazy_mean_full_array(bencher: divan::Bencher) {
         .bench_values(|a| Expr::from_array(a).mean().expect("mean"));
 }
 
+/// Lazy `a * 2 + 1` then mean over 1,000,000 in-memory f64 values: elementwise
+/// arithmetic and a full reduction, with no chunk reads. Run once without and
+/// once with `--features simd` to compare the scalar and vectorised paths.
+#[divan::bench]
+fn lazy_scale_shift_mean_in_memory_1m(bencher: divan::Bencher) {
+    let values: Vec<f64> = (0..N * N).map(|i| i as f64 * 0.001).collect();
+    bencher
+        .with_inputs(|| Expr::from_values(vec![N * N], values.clone()).expect("values"))
+        .bench_values(|e| e.mul_scalar(2.0).add_scalar(1.0).mean().expect("mean"));
+}
+
 /// Deterministic 1 MiB payload that is neither all zeros nor random.
 fn payload_1mib() -> Vec<u8> {
     (0..(1usize << 20)).map(|i| ((i / 8) % 251) as u8).collect()
