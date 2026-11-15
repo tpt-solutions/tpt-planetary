@@ -1,0 +1,181 @@
+# Time and frames
+
+Time and frame code is split between two crates:
+
+- `tpt-planetary-core` (`no_std`): Julian dates, calendar conversion, the
+  leap-second table, and the typed time scales `Utc`, `Tai` and `Tt`.
+- `tpt-planetary-astro` (needs `std` for the trigonometric parts): TDB and
+  TT helpers, Earth rotation angle and sidereal time, typed sky coordinates
+  with ICRS, Galactic, mean ecliptic and Alt/Az frames, and an ephemeris
+  (SPK) reader.
+
+## Time scales (core)
+
+An `Epoch<S>` is an instant on the scale `S`. The scale is a type parameter,
+so comparing or subtracting epochs on different scales does not compile.
+Conversions go through `to_scale`, and take the leap-second table as an
+argument.
+
+The example below converts 2017-01-01 00:00:00 UTC to TAI and TT. It was run
+in this workspace, and the output is shown after the code:
+
+```rust
+use tpt_planetary_core::calendar::CivilDate;
+use tpt_planetary_core::leap::EMBEDDED;
+use tpt_planetary_core::scale::{CivilTime, Epoch, Tai, Tt, Utc};
+
+let utc = Epoch::<Utc>::from_civil(
+    CivilTime { date: CivilDate::new(2017, 1, 1), hour: 0, minute: 0, second: 0.0 },
+    &EMBEDDED,
+).unwrap();
+let tai: Epoch<Tai> = utc.to_scale(&EMBEDDED).unwrap();
+let tt: Epoch<Tt> = tai.to_scale(&EMBEDDED).unwrap();
+println!("TAI-UTC at 2017-01-01 = {:.3} s", tai.jd().seconds_since(utc.jd()));
+println!("TT-TAI = {:.3} s", tt.jd().seconds_since(tai.jd()));
+```
+
+```text
+TAI-UTC at 2017-01-01 = 37.000 s
+TT-TAI = 32.184 s
+```
+
+Julian dates are two-part values (`JulianDate` in `tpt_planetary_core::jd`),
+stored as an integer day and a fraction. The integer day is the Julian Day
+Number of the civil day beginning at noon.
+
+Calendar conversion uses Meeus's algorithm in exact integer arithmetic. It
+supports the Gregorian and Julian calendars.
+
+### Leap-second table caveats
+
+- The embedded table is `EMBEDDED`, version 1. It lists the TAI - UTC steps
+  from 1972-01-01 (10 s) to 2017-01-01 (37 s). Its 28 entries were checked
+  line by line against the IERS `leap-seconds.list` file.
+- The table has a `valid_until` date, which is **2027-06-28**. The value comes
+  from the expiry line of that IERS file. After that date, UTC conversions
+  return `Error::LeapSecondTableExpired`. They do not guess.
+- A new leap second is announced only a few months in advance, so the table
+  has to be refreshed before each release.
+
+The expiry behaviour, from the same run:
+
+```rust
+use tpt_planetary_core::calendar::CivilDate;
+use tpt_planetary_core::leap::EMBEDDED;
+use tpt_planetary_core::scale::{CivilTime, Epoch, Utc};
+
+println!("valid_until = {:?} version={}", EMBEDDED.valid_until(), EMBEDDED.version());
+let late = Epoch::<Utc>::from_civil(
+    CivilTime { date: CivilDate::new(2028, 1, 1), hour: 0, minute: 0, second: 0.0 },
+    &EMBEDDED,
+);
+println!("2028 utc from_civil -> {:?}", late.map(|e| e.jd()));
+```
+
+```text
+valid_until = CivilDate { year: 2027, month: 6, day: 28 } version=1
+2028 utc from_civil -> Err(LeapSecondTableExpired)
+```
+
+## TDB and TT (astro)
+
+`tpt_planetary_astro::time` converts between TT and TDB with the leading
+three terms of the Fairhead and Bretagnon series. The bound on the
+truncation is about 1.7 ms: the amplitudes of the three terms sum to
+1.6929 ms.
+
+- The three terms were transcribed from memory of the ERFA `dtdb` leading
+  terms. They have **not** been checked against the source tables.
+- The full series is not implemented, so the result is an approximation.
+- Date pairs are passed as `(hi, lo)` with `hi + lo` the Julian date.
+
+The example below continues from the TT epoch above, using the same run. The
+values are printed for inspection, not as validated results:
+
+```rust
+use tpt_planetary_astro::ephemeris::earth_sun_distance_au_approx;
+use tpt_planetary_astro::time::{tdb_to_tt, tt_to_tdb};
+
+let jd = tt.jd();
+let (hi, lo) = tt_to_tdb(jd.day(), jd.fraction());
+println!("TDB-TT at 2017 = {:.6e} s", ((hi - jd.day()) + (lo - jd.fraction())) * 86400.0);
+let (bh, bl) = tdb_to_tt(hi, lo);
+println!("round trip err = {:.3e} s", ((bh - jd.day()) + (bl - jd.fraction())) * 86400.0);
+println!("earth-sun AU at TT 2017 = {:.6}", earth_sun_distance_au_approx(jd.day(), jd.fraction()));
+```
+
+```text
+TDB-TT at 2017 = -4.607892e-5 s
+round trip err = 0.000e0 s
+earth-sun AU at TT 2017 = 0.983305
+```
+
+The round-trip check is in `tpt-planetary-cli/tests/dataflow.rs` with a
+100 ns tolerance. The Earth-Sun value is the low-precision Meeus series in
+AU. The 2017 value is close to the known January perihelion, but the series
+has not been checked against an ephemeris.
+
+Earth rotation angle, GMST and GAST are also in `astro::time`. The UT1 scale
+type is not implemented, so the caller supplies UT1 as a Julian date pair.
+`astro::eop` parses `finals2000A`-format text and provides `EopTable`, which
+interpolates UT1-UTC and polar motion and converts UTC to UT1. Its column
+positions are unverified, and no EOP data file is bundled.
+
+## Frames (astro)
+
+`SkyCoord<F>` holds a longitude and latitude in radians and carries its frame
+as a type parameter. Frame transforms are implemented for these pairs:
+
+- ICRS and Galactic (fixed rotation from the J2000 Galactic pole constants);
+- ICRS and mean ecliptic of J2000 (IAU 1976 obliquity);
+- ICRS to true ecliptic, with an obliquity supplied by the caller;
+- ICRS to Alt/Az for an `Observer` and a local sidereal time.
+
+The example below converts M31's ICRS position to Galactic, round-trips it,
+and computes its altitude and azimuth at an observer for local sidereal time
+zero. The numbers were printed by this run:
+
+```rust
+use tpt_planetary_astro::frames::{Galactic, Icrs, Observer, SkyCoord, icrs_to_altaz};
+
+let m31 = SkyCoord::<Icrs>::from_degrees(10.6847, 41.2687);
+let gal: SkyCoord<Galactic> = m31.transform_to();
+println!("galactic lon={:.4} lat={:.4}", gal.lon_deg(), gal.lat_deg());
+let back: SkyCoord<Icrs> = gal.transform_to();
+println!("roundtrip ra={:.6} dec={:.6}", back.lon_deg(), back.lat_deg());
+let obs = Observer::from_degrees(51.5, -0.13);
+let altaz = icrs_to_altaz(m31, obs, 0.0);
+println!("altaz az={:.4} alt={:.4}", altaz.lon_deg(), altaz.lat_deg());
+```
+
+```text
+galactic lon=121.1743 lat=-21.5734
+roundtrip ra=10.684700 dec=41.268700
+altaz az=140.2279 alt=77.4183
+```
+
+The Galactic longitude and latitude of M31 agree with commonly published
+values to the digits shown. That is a sanity check on the orientation of the
+rotation, not a validation against Astropy. The Galactic pole constants were
+written from memory and are on the open list in
+[Status and limitations](status-and-limitations.md).
+
+Known gaps in the frame layer:
+
+- The "ICRS to ecliptic at epoch" helper rotates by the epoch obliquity but
+  keeps the J2000 equinox, so it is not the mean ecliptic of date. Its name is
+  on the open list.
+- Precession, nutation, aberration, proper motion, ITRS and polar motion are
+  not implemented. The geodetic observer has no polar motion, and its height
+  is ignored.
+- The polar-motion sign convention has not been checked against a reference.
+
+## Ephemerides
+
+`tpt_planetary_astro::ephemeris` reads NAIF DAF/SPK files, such as JPL DE440,
+from a byte slice. It evaluates Chebyshev segments for position and velocity,
+and it applies one iteration of light-time correction. The helper
+`earth_sun_distance_km` needs a kernel file with the Earth and Sun segments.
+The workspace does not bundle a kernel, and the successful kernel path has not
+been validated against JPL Horizons. See
+[Status and limitations](status-and-limitations.md).
