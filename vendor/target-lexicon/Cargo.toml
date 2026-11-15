@@ -1,0 +1,18 @@
+[package]
+name = "target-lexicon"
+# Same name and minor version as the upstream crate so that it can be used via
+# `[patch.crates-io]` for existing `target-lexicon = "0.13"` requirements.
+version = "0.13.6"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+description = "MIT-licensed target triple parsing (API-compatible subset of target-lexicon)"
+repository = "https://github.com/tpt-solutions/target-lexicon-mit"
+readme = "README.md"
+keywords = ["target", "triple", "cross-compilation"]
+categories = ["development-tools::build-utils"]
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
