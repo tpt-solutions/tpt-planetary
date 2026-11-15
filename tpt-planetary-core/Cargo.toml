@@ -1,0 +1,32 @@
+[package]
+name = "tpt-planetary-core"
+description = "no_std foundation for tpt-planetary: constants, time scales and spherical math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["astronomy", "time", "no_std", "spherical", "coordinates"]
+categories = ["science", "no-std", "mathematics"]
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dependencies]
+glam = { workspace = true, features = ["libm", "f64"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Benchmark harness (MIT OR Apache-2.0, rust-version 1.80).
+divan = { version = "0.1.21", default-features = false }
+
+[[bench]]
+name = "core"
+harness = false
