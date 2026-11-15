@@ -96,8 +96,12 @@ fn wrap_two_pi(angle: f64) -> f64 {
 #[must_use]
 #[allow(clippy::excessive_precision)] // IAU 2000 rate constant kept at full published digits.
 pub fn earth_rotation_angle(ut1_hi: f64, ut1_lo: f64) -> f64 {
+    // Only the fractional part of Tu enters the turns modulo 1, because
+    // 1.00273781191135448 * Tu = Tu + 0.00273781191135448 * Tu and the integer
+    // part of Tu drops out. Multiplying the full Tu (about 3.6e4 days for 1900)
+    // by 1.0027... before reducing mod 1 loses about 1e-11 rad to rounding.
     let tu = (ut1_hi - J2000_JD) + ut1_lo;
-    let turns = 0.779_057_273_264 + 1.002_737_811_911_354_48 * tu;
+    let turns = 0.779_057_273_264 + tu.fract() + 0.002_737_811_911_354_48 * tu;
     wrap_two_pi(TAU * turns.rem_euclid(1.0))
 }
 
