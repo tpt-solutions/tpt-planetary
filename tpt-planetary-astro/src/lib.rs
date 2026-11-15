@@ -14,6 +14,8 @@
 //! - [`nutation`]: IAU 2000A_R06 nutation (full series), the nutation matrix,
 //!   and the classical equation of the equinoxes. The fundamental arguments
 //!   and table data need no `std`; the series and matrix need `std`.
+//! - [`cio`]: CIP coordinates X and Y, the CIO and TIO locators, frame bias,
+//!   and the CIO-based ICRS to ITRS matrix (IAU 2006/2000A). Needs `std`.
 //! - [`wcs`]: FITS WCS header parsing and TAN/SIN/AIT projections. Needs `std`.
 //!
 //! Feature flags:
@@ -37,6 +39,11 @@ pub mod precession;
 
 #[cfg(feature = "std")]
 mod nutation_data;
+
+#[cfg(feature = "std")]
+pub mod cio;
+#[cfg(feature = "std")]
+mod cio_data;
 
 #[cfg(feature = "std")]
 pub mod frames;

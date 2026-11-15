@@ -26,9 +26,23 @@
 //!   plus the classical equation of the equinoxes (no complementary terms).
 //! - `tod`: `ra_deg dec_deg tt_hi tt_lo` -> ICRS to true equator of date
 //!   `lon_deg lat_deg` (precession, nutation; no frame bias).
+//! - `xy`: `tt_hi tt_lo` -> CIP `X Y` in radians (IAU 2006/2000A, GCRS).
+//! - `s`: `tt_hi tt_lo` -> CIO locator `s` in radians.
+//! - `sp`: `tt_hi tt_lo` -> TIO locator `s'` in radians.
+//! - `c2i`: `tt_hi tt_lo` -> the nine elements of the ICRS to CIRS matrix
+//!   (row-major).
+//! - `bias`: any one field -> the nine elements of the frame bias matrix.
+//! - `eect`: `tt_hi tt_lo` -> EO complementary terms in radians (Table 5.2e).
+//! - `era`: `ut1_hi ut1_lo` -> Earth rotation angle in radians.
+//! - `c2t`: `tt_hi tt_lo ut1_hi ut1_lo xp yp` -> the nine elements of the ICRS
+//!   to ITRS matrix, with `xp`, `yp` in radians (row-major).
+//! - `c2t_xys`: `x y s era sp xp yp` (radians) -> the nine elements of the
+//!   chain matrix built from those components (row-major). Used with ERFA's
+//!   own `xys06a`, `era00` and `sp00` to isolate the matrix algebra.
 
 use std::io::{self, BufRead, Write};
 
+use tpt_planetary_astro::cio;
 use tpt_planetary_astro::eop::ARCSEC_TO_RAD;
 use tpt_planetary_astro::ephemeris::earth_sun_distance_au_approx;
 use tpt_planetary_astro::frames::{Icrs, MeanEcliptic, SkyCoord, polar_motion_matrix};
@@ -54,77 +68,119 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let result = match mode.as_str() {
-            "tdb" => {
-                parse_fields(&line, 2).map(|v| time::tdb_minus_tt_seconds(v[0], v[1]).to_string())
-            }
-            "obl" => parse_fields(&line, 2)
-                .map(|v| time::mean_obliquity_iau2006_arcsec(v[0], v[1]).to_string()),
-            "ecl" => parse_fields(&line, 2).map(|v| {
-                let c = SkyCoord::<Icrs>::from_degrees(v[0], v[1]).transform_to::<MeanEcliptic>();
-                format!("{} {}", c.lon_deg(), c.lat_deg())
-            }),
-            "pm" => parse_fields(&line, 2).map(|v| {
-                let w = polar_motion_matrix(v[0] * ARCSEC_TO_RAD, v[1] * ARCSEC_TO_RAD);
-                w.iter()
-                    .flatten()
-                    .map(f64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
-            "esd" => {
-                parse_fields(&line, 2).map(|v| earth_sun_distance_au_approx(v[0], v[1]).to_string())
-            }
-            "prec" => parse_fields(&line, 1).map(|v| {
-                let t = v[0];
-                let (zeta, z, theta) = precession::precession_angles_arcsec(t);
-                let p = precession::precession_matrix(t);
-                let mut fields = vec![zeta.to_string(), z.to_string(), theta.to_string()];
-                fields.extend(p.iter().flatten().map(f64::to_string));
-                fields.join(" ")
-            }),
-            "fa" => parse_fields(&line, 1).map(|v| {
-                nutation::fundamental_arguments(v[0])
-                    .iter()
-                    .map(f64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
-            "nut" => parse_fields(&line, 2).map(|v| {
-                let (dpsi, deps) = nutation::nutation_angles(v[0], v[1]);
-                format!("{dpsi} {deps}")
-            }),
-            "ee" => parse_fields(&line, 2)
-                .map(|v| nutation::equation_of_equinoxes(v[0], v[1]).to_string()),
-            "numat" => parse_fields(&line, 2).map(|v| {
-                nutation::nutation_matrix(v[0], v[1])
-                    .iter()
-                    .flatten()
-                    .map(f64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
-            "numat_from" => parse_fields(&line, 3).map(|v| {
-                nutation::nutation_matrix_from_angles(v[0], v[1], v[2])
-                    .iter()
-                    .flatten()
-                    .map(f64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
-            "nut_sofa" => parse_fields(&line, 1).map(|v| {
-                let (dpsi, deps) = nutation::nutation_angles_t_without_out_of_phase_rates(v[0]);
-                format!("{dpsi} {deps}")
-            }),
-            "gast" => parse_fields(&line, 4)
-                .map(|v| time::gast_iau2006(v[0], v[1], v[2], v[3]).to_string()),
-            "tod" => parse_fields(&line, 4).map(|v| {
-                let star = SkyCoord::<Icrs>::from_degrees(v[0], v[1]);
-                let c = nutation::icrs_to_true_equator_of_date(star, v[2], v[3]);
-                format!("{} {}", c.lon_deg(), c.lat_deg())
-            }),
-            _ => None,
-        };
+        let result =
+            match mode.as_str() {
+                "tdb" => parse_fields(&line, 2)
+                    .map(|v| time::tdb_minus_tt_seconds(v[0], v[1]).to_string()),
+                "obl" => parse_fields(&line, 2)
+                    .map(|v| time::mean_obliquity_iau2006_arcsec(v[0], v[1]).to_string()),
+                "ecl" => parse_fields(&line, 2).map(|v| {
+                    let c =
+                        SkyCoord::<Icrs>::from_degrees(v[0], v[1]).transform_to::<MeanEcliptic>();
+                    format!("{} {}", c.lon_deg(), c.lat_deg())
+                }),
+                "pm" => parse_fields(&line, 2).map(|v| {
+                    let w = polar_motion_matrix(v[0] * ARCSEC_TO_RAD, v[1] * ARCSEC_TO_RAD);
+                    w.iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "esd" => parse_fields(&line, 2)
+                    .map(|v| earth_sun_distance_au_approx(v[0], v[1]).to_string()),
+                "prec" => parse_fields(&line, 1).map(|v| {
+                    let t = v[0];
+                    let (zeta, z, theta) = precession::precession_angles_arcsec(t);
+                    let p = precession::precession_matrix(t);
+                    let mut fields = vec![zeta.to_string(), z.to_string(), theta.to_string()];
+                    fields.extend(p.iter().flatten().map(f64::to_string));
+                    fields.join(" ")
+                }),
+                "fa" => parse_fields(&line, 1).map(|v| {
+                    nutation::fundamental_arguments(v[0])
+                        .iter()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "nut" => parse_fields(&line, 2).map(|v| {
+                    let (dpsi, deps) = nutation::nutation_angles(v[0], v[1]);
+                    format!("{dpsi} {deps}")
+                }),
+                "ee" => parse_fields(&line, 2)
+                    .map(|v| nutation::equation_of_equinoxes(v[0], v[1]).to_string()),
+                "numat" => parse_fields(&line, 2).map(|v| {
+                    nutation::nutation_matrix(v[0], v[1])
+                        .iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "numat_from" => parse_fields(&line, 3).map(|v| {
+                    nutation::nutation_matrix_from_angles(v[0], v[1], v[2])
+                        .iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "nut_sofa" => parse_fields(&line, 1).map(|v| {
+                    let (dpsi, deps) = nutation::nutation_angles_t_without_out_of_phase_rates(v[0]);
+                    format!("{dpsi} {deps}")
+                }),
+                "gast" => parse_fields(&line, 4)
+                    .map(|v| time::gast_iau2006(v[0], v[1], v[2], v[3]).to_string()),
+                "tod" => parse_fields(&line, 4).map(|v| {
+                    let star = SkyCoord::<Icrs>::from_degrees(v[0], v[1]);
+                    let c = nutation::icrs_to_true_equator_of_date(star, v[2], v[3]);
+                    format!("{} {}", c.lon_deg(), c.lat_deg())
+                }),
+                "xy" => parse_fields(&line, 2).map(|v| {
+                    let (x, y) = cio::cip_xy(v[0], v[1]);
+                    format!("{x} {y}")
+                }),
+                "s" => parse_fields(&line, 2).map(|v| cio::cio_locator(v[0], v[1]).to_string()),
+                "sp" => parse_fields(&line, 2).map(|v| cio::tio_locator(v[0], v[1]).to_string()),
+                "c2i" => parse_fields(&line, 2).map(|v| {
+                    cio::icrs_to_cirs(v[0], v[1])
+                        .iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "bias" => parse_fields(&line, 1).map(|_| {
+                    cio::frame_bias_matrix()
+                        .iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "eect" => parse_fields(&line, 2)
+                    .map(|v| cio::eo_complementary_terms(v[0], v[1]).to_string()),
+                "era" => parse_fields(&line, 2)
+                    .map(|v| time::earth_rotation_angle(v[0], v[1]).to_string()),
+                "c2t" => parse_fields(&line, 6).map(|v| {
+                    cio::icrs_to_itrs(v[0], v[1], v[2], v[3], v[4], v[5])
+                        .iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                "c2t_xys" => parse_fields(&line, 7).map(|v| {
+                    cio::itrs_from_components(v[0], v[1], v[2], v[3], v[4], v[5], v[6])
+                        .iter()
+                        .flatten()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                _ => None,
+            };
         match result {
             Some(s) => writeln!(out, "{s}").expect("stdout writable"),
             None => {
