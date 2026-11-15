@@ -665,6 +665,8 @@ fn norm(v: [f64; 3]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
     extern crate std;
 
     use super::*;
@@ -1014,6 +1016,7 @@ mod tests {
         assert_eq!(SpkFile::new(&junk).err(), Some(EphemerisError::NotSpk));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn light_time_is_distance_over_c_for_static_target() {
         // Constant-position target 1e8 km from a fixed observer at the SSB:
@@ -1052,6 +1055,7 @@ mod tests {
         assert!((lt.state.position[0] - 1.0e8).abs() < 1e-6);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn earth_sun_approx_is_within_perihelion_aphelion_range() {
         // Perihelion near 3 January, aphelion near 4 July (2000).

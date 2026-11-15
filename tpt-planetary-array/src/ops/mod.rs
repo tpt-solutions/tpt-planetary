@@ -3,8 +3,8 @@
 //! and rolling and block-resampling along one axis.
 //!
 //! Every operation builds a node in the [`Expr`](crate::Expr) graph. Nothing
-//! is computed until a reduction (for example [`Expr::mean`] or
-//! [`Expr::reduce_axes`]) streams the result in blocks, so a chain such as
+//! is computed until a reduction (for example `mean` or
+//! `reduce_axes`) streams the result in blocks, so a chain such as
 //! `a.mul_scalar(2.0).add_scalar(1.0)` reads each source chunk once and never
 //! materialises an intermediate array.
 //!

@@ -351,6 +351,8 @@ impl<'a> EopTable<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "std"))]
+    use alloc::{format, string::String, vec};
 
     /// Writes `text` right-justified into the span of a blank line.
     fn put(buf: &mut [u8], span: Span, text: &str) {
@@ -460,6 +462,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn text_parser_skips_predicted_and_numbers_bad_lines() {
         let good = observed("59000.00", "0.1", "0.2", "0.3", "0.4");
