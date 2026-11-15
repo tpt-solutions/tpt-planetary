@@ -1,0 +1,31 @@
+[package]
+name = "tpt-planetary-astro"
+description = "Time scales, coordinate frames, ephemeris and WCS for tpt-planetary (Astropy replacement)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["astronomy", "ephemeris", "wcs", "coordinates", "time-scales"]
+categories = ["science", "astronomy"]
+
+[dependencies]
+tpt-planetary-core = { workspace = true, features = ["alloc"] }
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+# Benchmark harness (MIT OR Apache-2.0, rust-version 1.80).
+divan = { version = "0.1.21", default-features = false }
+
+[[bench]]
+name = "astro"
+harness = false
