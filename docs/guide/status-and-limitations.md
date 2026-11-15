@@ -46,7 +46,8 @@ None of the four milestones in `todo.md` is met yet.
 - **EOP column positions.** The `finals2000A` column map in
   `tpt-planetary-astro/src/eop.rs` was written from memory and has not been
   checked against the IERS readme.
-- **Polar-motion sign.** The `W = R2(xp) R1(yp)` convention is not checked.
+- **Polar-motion sign.** The `W = R2(xp) R1(yp)` convention is checked against
+  `erfa.pom00` and `erfa.c2t06a` (see `docs/validation.md`).
 - **TDB.** Only three terms of the series are used, so the result is an
   approximation with a truncation bound of about 1.7 ms.
 - **Leap-second table expiry.** `EMBEDDED` is valid until 2027-06-28. After
@@ -62,10 +63,13 @@ None of the four milestones in `todo.md` is met yet.
   and matrix, no frame bias). IAU 2000A_R06 nutation is available as
   `tpt_planetary_astro::nutation`: the full luni-solar and planetary series in
   longitude and obliquity, the nutation matrix, and the classical equation of the
-  equinoxes `dpsi cos(eps0)`. Limits: no IAU 2000B, no complementary terms of the
-  equation of the origins (up to 2.65 mas in GAST), no s', no CIP or CIO, and no
-  frame bias. There is no aberration, proper motion, ITRS, polar motion, or
-  CIRS/TIRS transform. FK5 and FK4 are not implemented.
+  equinoxes `dpsi cos(eps0)`. Limits: no IAU 2000B, and GAST does not yet include
+  the complementary terms of the equation of the origins (up to 2.65 mas; the
+  terms are in `astro::cio`). No frame bias in the nutation matrix.
+- The CIP X and Y, the CIO and TIO locators, and the ICRS to ITRS matrix are in
+  `tpt_planetary_astro::cio` (IAU 2006/2000A, validated against pyerfa). There is
+  no aberration, proper motion, apparent position, or typed ITRS, CIRS or TIRS
+  frame. FK5 and FK4 are not implemented.
 - The nutation series follow the published IERS Conventions (2010) tables,
   which include the time-varying out-of-phase amplitudes. ERFA's `nut06a` omits
   them, so the two differ by up to 5.3 uas in dpsi over 1900-2100. The difference

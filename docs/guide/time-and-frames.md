@@ -167,9 +167,48 @@ Known gaps in the frame layer:
   on the open list.
 - IAU 2006 precession (`tpt_planetary_astro::precession`) is implemented as a
   mean-equator-of-date transform with no nutation and no frame bias. Nutation,
-  aberration, proper motion, ITRS and polar motion are not implemented. The geodetic observer has no polar motion, and its height
-  is ignored.
-- The polar-motion sign convention has not been checked against a reference.
+  aberration and proper motion are not implemented. There are no typed ITRS,
+  CIRS or TIRS frames; the matrices are in `astro::cio` (below). The geodetic
+  observer has no polar motion, and its height is ignored.
+- The polar-motion sign convention is checked against `erfa.pom00` and
+  `erfa.c2t06a` (see [Validation](validation.md)).
+
+## CIO-based ICRS to ITRS chain (astro::cio)
+
+`tpt_planetary_astro::cio` implements the IAU 2006/2000A celestial-to-terrestrial
+chain of IERS Conventions (2010), Chapter 5, as matrices:
+
+- `cip_xy(tt_hi, tt_lo)`: the CIP coordinates X and Y in the GCRS (Table 5.2a
+  and Table 5.2b, Eq. 5.16). They include the frame bias at J2000.0.
+- `cio_locator(tt_hi, tt_lo)`: the CIO locator s, from Table 5.2d (s + XY/2)
+  minus XY/2.
+- `tio_locator(tt_hi, tt_lo)`: the TIO locator s' = -47 uas t (Eq. 5.13).
+- `frame_bias_matrix()`: ICRS to the mean equator and equinox of J2000.0 (Eqs.
+  5.17, 5.21, 5.33). The chain does not apply it, because the X and Y series
+  already include the bias.
+- `icrs_to_cirs`, `cirs_to_tirs`, `tirs_to_itrs`, and the composite
+  `icrs_to_itrs(tt_hi, tt_lo, ut1_hi, ut1_lo, xp, yp)`, which returns the
+  matrix `M` with `v_ITRS = M v_ICRS`. The angles are in radians.
+- `eo_complementary_terms(tt_hi, tt_lo)`: the non-polynomial part of Table 5.2e,
+  the complementary terms of the equation of the origins.
+
+Rotations are passive, as in `frames.rs`. The matrices are the transposes of
+the chapter's active `Q`, `R` and `W` as printed, and ERFA's `c2t06a` (the
+GCRS to ITRS matrix) equals `icrs_to_itrs` directly.
+
+Accuracy against pyerfa over 1900-2100 (see [Validation](validation.md)):
+
+- X, Y and s agree with `erfa.xy06` and `erfa.s06` to about 1 uas or better.
+- Given ERFA's own components, the chain matches `erfa.c2t06a` to 2e-18.
+- End to end, `icrs_to_itrs` differs from `erfa.c2t06a` by 3.6 uas. That is
+  the difference between ERFA's `xys06a` and `xy06` routes to X and Y. The
+  series used here matches `xy06`.
+
+Not included: IAU 2000B; the polar-motion history term of s' (Eqs. 5.4 and
+5.12, bounded by the chapter at 0.4 mas per century); UT1 and polar motion,
+which are inputs (no IERS data is bundled); the complementary terms in GAST
+(the function exists, but `time::gast_iau2006` does not use it yet). The
+module needs `std`.
 
 ## Ephemerides
 

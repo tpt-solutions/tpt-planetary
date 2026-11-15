@@ -10,13 +10,15 @@ beyond that, and they are not a claim about the full algorithms.
 
 | Package | Version | Used for |
 | --- | --- | --- |
-| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00`, `erfa.p06e`, `erfa.fal03` to `erfa.fapa03`, `erfa.nut06a`, `erfa.ee06a`, `erfa.num06a`, `erfa.gst06a` |
+| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00`, `erfa.p06e`, `erfa.fal03` to `erfa.fapa03`, `erfa.nut06a`, `erfa.ee06a`, `erfa.num06a`, `erfa.gst06a`, `erfa.xy06`, `erfa.xys06a`, `erfa.s06`, `erfa.sp00`, `erfa.bp00`, `erfa.eect00`, `erfa.c2i06a`, `erfa.c2t06a` |
 | astropy | 8.0.2 | `LeapSeconds.from_iers_leap_seconds` (bundled list, read offline), `SkyCoord` (ICRS, Galactic, `BarycentricMeanEcliptic`, `GeocentricMeanEcliptic`), `astropy.wcs.WCS` (wcslib) |
 | numpy | 2.5.4 | sampling and vector arithmetic |
 
 Quantities the Python bindings do not expose (TDB, obliquity, the ecliptic
-frame, the nutation series, the equation of the equinoxes, the nutation matrix
-and GAST) are computed by the `validation_dump` example in
+frame, the nutation series, the equation of the equinoxes, the nutation matrix,
+GAST, the CIP coordinates X and Y, the CIO and TIO locators, the frame bias
+matrix, the EO complementary terms and the CIO-based ICRS to ITRS matrix) are
+computed by the `validation_dump` example in
 `tpt-planetary-astro/examples/`, a std-only helper that is not part of the
 public API.
 
@@ -30,8 +32,8 @@ passing, so the status cannot drift silently.
 | --- | --- | --- | --- | --- | --- |
 | Leap-second table (28 steps, last value 37 s) | `erfa.dat` (pyerfa 2.0.1.5); `LeapSeconds` (astropy 8.0.2) | 119 dates: 1 Jan and 1 Jul 1972-2017, plus the day before each step | Integer steps identical. Max residual 4.7e-12 s (two-part JD rounding) | Exact integer; residual below 1 ns | pass |
 | TT -> TDB (three leading terms) | `erfa.dtdb` (pyerfa 2.0.1.5) | 404 TT epochs, 2000-2026 | 14.89 us (mean 1.28 us, std 5.0 us) | 1 us for validation; 20 us regression guard | xfail (validation); pass (guard) |
-| Earth rotation angle | `erfa.era00` (pyerfa 2.0.1.5) | 200 UT1 = UTC epochs, 2000-2026, UT1-UTC = 0 | 4.0e-6 arcsec | 1 mas | pass |
-| GMST (IAU 2006) | `erfa.gmst06` (pyerfa 2.0.1.5) | same 200 epochs, TT = UT1 + 69.184 s | 3.6e-6 arcsec (2.4e-4 ms of time) | 1 mas | pass |
+| Earth rotation angle | `erfa.era00` (pyerfa 2.0.1.5) | 200 UT1 = UTC epochs, 2000-2026, UT1-UTC = 0 | 1.1e-6 arcsec (was 4.0e-6 before the rounding fix, see findings) | 1 mas | pass |
+| GMST (IAU 2006) | `erfa.gmst06` (pyerfa 2.0.1.5) | same 200 epochs, TT = UT1 + 69.184 s | 1.2e-6 arcsec (7.7e-5 ms of time; was 3.6e-6 arcsec) | 1 mas | pass |
 | Mean obliquity, IAU 2006 | `erfa.obl06` (pyerfa 2.0.1.5) | J2000.0, +1 and +10 Julian centuries | 0 (identical at the printed precision) | 1 mas | pass |
 | ICRS -> Galactic | `SkyCoord.galactic` (astropy 8.0.2) | 1000 random sphere points | 0.0249 arcsec (mean 0.0195 arcsec) | 0.1 arcsec | pass |
 | Galactic -> ICRS | `SkyCoord.icrs` (astropy 8.0.2) | 1000 random sphere points | 0.0249 arcsec (mean 0.0196 arcsec) | 0.1 arcsec | pass |
@@ -58,6 +60,16 @@ passing, so the status cannot drift silently.
 | Nutation matrix from the published angles | `erfa.num06a` | same 300 epochs | 2.35e-11 (about 4.9 uas) | 2.5e-11 | pass |
 | GAST (`time::gast_iau2006`) vs `erfa.gst06a`, UT1 = TT | `erfa.gst06a` | same 300 epochs | 2.65 mas (max), 1.86 mas rms; the same complementary-term omission | 2.7 mas | pass |
 | ICRS -> true equator of date (N P, no frame bias) | `erfa.num06a` times `erfa.bp06` `rp` | 12 epochs x 4 random sky points | 3.04 uas | 6 uas | pass |
+| CIP X (IAU 2006/2000A, Table 5.2a, blocks j = 0..4) | `erfa.xy06` (pyerfa 2.0.1.5) | 200 TT epochs, 1900-01-01 to 2100-01-01 | 1.07e-6 uas | 1 uas | pass |
+| CIP Y (IAU 2006/2000A, Table 5.2b) | `erfa.xy06` | same 200 epochs | 8.5e-7 uas | 1 uas | pass |
+| CIO locator s (Table 5.2d, minus XY/2) | `erfa.s06` with `erfa.xy06` X, Y | same 200 epochs | 3.2e-9 uas | 1 uas | pass |
+| TIO locator s' = -47 uas t (Eq. 5.13) | `erfa.sp00` (pyerfa 2.0.1.5) | same 200 epochs | 1e-14 uas | 1 uas | pass |
+| Frame bias matrix B = R1(-eta0) R2(xi0) R3(dalpha0) | `erfa.bp00` `rb` (pyerfa 2.0.1.5) | J2000.0 (time-independent) | 6.8e-13 (matrix elements) | 1e-11 | pass |
+| EO complementary terms (Table 5.2e, non-polynomial part) | `erfa.eect00` (pyerfa 2.0.1.5) | same 200 epochs; the terms range from 21 to 2648 uas | 3.8e-11 uas | 1 uas | pass |
+| Matrix algebra: chain built from ERFA's own X, Y, s, ERA and s' | `erfa.c2t06a` (pyerfa 2.0.1.5) | same 200 epochs; xp = yp = 0 and xp, yp = 0.1, 0.2 arcsec | 1.7e-18 | 1e-12 | pass |
+| Convention guard: chain not transposed | `erfa.c2t06a` | same, one epoch | the transpose differs by about 2 | > 1e-5 | pass |
+| ICRS -> ITRS matrix, end to end (our X, Y, s, ERA, s', polar motion) | `erfa.c2t06a` (pyerfa 2.0.1.5) | same 200 epochs; xp = yp = 0, and xp, yp = 0.1, 0.2 arcsec | 1.76e-11 rad = 3.63 uas, the same with and without polar motion | 2.5e-11 rad (about 5 uas) | pass |
+| ERFA's own X, Y routes: `erfa.xys06a` against `erfa.xy06` | pyerfa 2.0.1.5 | same 200 epochs | 3.63 uas (X and Y) | must exceed 1 uas (the guard that explains the row above) | pass (reference ambiguity) |
 
 Polar motion and Earth-Sun use `validation_dump` modes `pm` and `esd`, and their
 tests are in `bindings/tpt-planetary-py/tests/validation/test_earth_orientation.py`.
@@ -68,6 +80,27 @@ Nutation uses modes `fa`, `nut`, `nut_sofa`, `ee`, `numat`, `numat_from`, `gast`
 and `tod`, and the tests are in
 `bindings/tpt-planetary-py/tests/validation/test_nutation.py`. The bindings do
 not expose these quantities.
+
+### CIP and CIO inputs
+
+Series: IERS Conventions (2010), Chapter 5, Tables 5.2a (X), 5.2b (Y), 5.2d
+(s + XY/2) and 5.2e (the EO complementary terms, non-polynomial part). IAU
+2006/2000A. Generated by `tpt-planetary-astro/tools/gen_cio_table.py` into
+`tpt-planetary-astro/src/cio_data.rs`. The generator pins these checksums, fails
+on any mismatch, checks each block's row count against its `Number of terms`
+header, and checks that each printed polynomial line occurs verbatim in its
+source file. Regeneration was checked to be byte-identical.
+
+| File | sha256 | Terms per block (j = 0, 1, 2, 3, 4) |
+| --- | --- | --- |
+| `tab5.2a.txt` (X) | `19549252df9eb77c8237dbf5b749de82b7fd7713a8b60b35371538cd36b6aa1d` | 1306, 253, 36, 4, 1 |
+| `tab5.2b.txt` (Y) | `1f17a3a6ad0b468705b3323bfe72d0320ce996798ec7cba0cdde4405d88f14d9` | 962, 277, 30, 5, 1 |
+| `tab5.2d.txt` (s + XY/2) | `fe94c83e1ef6f92b15b3f007779ae70c0984c06ee45d5511b4c821ee9a0ecded` | 33, 3, 25, 4, 1 |
+| `tab5.2e.txt` (EO complementary terms) | `a5c690b277108e35d88df9cc20fea4120dfbc10a81444bb41b15cf9c6edcd6cb` | 33, 1 |
+
+The files are from `conv.tgz` under `conventions_v1_0_0/2010_official/chapter5/additional_info/`.
+The TIO locator (-47 uas t, Eq. 5.13), the frame-bias constants (Eqs. 5.17,
+5.21, 5.33) and the Table 5.2e definitions are in the chapter text.
 
 ### Nutation inputs
 
@@ -90,7 +123,40 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
 
 ### Findings
 
-### Findings
+- **Earth rotation angle rounding (fixed).** `time::earth_rotation_angle`
+  multiplied the whole Tu, about 3.6e4 days at 1900, by 1.00273781191135448
+  before reducing modulo one turn. That lost about 1e-11 rad to rounding. It now
+  adds the fractional day separately, and the formula is unchanged. The maximum
+  ERA difference from `erfa.era00` at 1900-2100 is 5.5e-14 rad, where it was
+  4.2e-11 rad before. The 2000-2026 ERA and GMST rows above reflect the fix.
+- **CIP X and Y: ERFA has two routes that disagree.** `erfa.xy06` (the series)
+  matches our X and Y to 1.1e-6 uas. `erfa.xys06a`, which `erfa.c2i06a` and
+  `erfa.c2t06a` use, differs from `xy06` by 3.63 uas in X and Y at most. Our
+  end-to-end matrix against `c2t06a` differs by 3.63 uas, the same value. The
+  matrix algebra is exact given ERFA's components (1.7e-18), so the end-to-end
+  residual comes from the X, Y route. The likely cause is the IAU 2006 periodic
+  corrections of Eq. 5.19 and Table 5.2f, which the published tables include
+  and which `xys06a`'s nutation model does not. That attribution is not verified
+  term by term. The end-to-end tolerance is set at 5 uas, the level of the
+  reference disagreement. The tight algebra check is the test of our matrices.
+- **ICRS -> ITRS matrix convention (confirmed).** `icrs_to_itrs` equals
+  `erfa.c2t06a` directly. It is not the transpose, which differs by about 2.
+  The chain is `W R3(ERA) Q^T`, built from passive rotations as in `frames.rs`.
+- **TIO locator.** `s' = -47 uas t` (Eq. 5.13) agrees with `sp00` to 1e-14 uas.
+  Only this secular value is implemented. The general form (Eqs. 5.4 and 5.12)
+  depends on the polar-motion history, which the module does not take as input.
+  The chapter bounds the resulting s at 0.4 mas per century.
+- **Frame bias.** `B = R1(-eta0) R2(xi0) R3(dalpha0)` with xi0 = -16.6170 mas
+  (Eq. 5.33), eta0 = -6.8192 mas (Eq. 5.17), dalpha0 = -14.60 mas (Eq. 5.21)
+  agrees with `erfa.bp00`'s `rb` to 6.8e-13. The chain does not multiply by B,
+  because the CIP series already contain the bias (Eq. 5.17: the constant
+  -16617 uas in X).
+- **EO complementary terms (implemented, not used by GAST).** The non-polynomial
+  part of Table 5.2e is `cio::eo_complementary_terms`. It agrees with
+  `erfa.eect00` to 3.8e-11 uas over 1900-2100. The terms reach 2.65 mas, so GAST
+  (`time::gast_iau2006`) and `equation_of_equinoxes` still omit up to 2.65 mas.
+  Wiring the terms into GAST is a separate change. It would tighten the GAST row
+  above to the microarcsecond level.
 
 - **AIT inverse accepted pixels outside the projection (fixed).** The inverse
   checked the ellipse with semi-axes 4 and 2 rad, not the Hammer domain with
@@ -121,7 +187,9 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   satisfies V(TRS) = rpom V(CIP), so `pom00` maps TIRS to ITRS and W is the
   ITRS -> TIRS direction. The physical check agrees: the CIP sits at
   `(xp, -yp, 1)` in ITRS, to first order. The existing test
-  `polar_motion_maps_cip_to_tirs_z_axis` covers this. The matrix omits s'.
+  `polar_motion_maps_cip_to_tirs_z_axis` covers this. `polar_motion_matrix`
+  omits s'. `cio::tirs_to_itrs` adds it, and the chain is checked against
+  `erfa.c2t06a` with xp, yp = 0.1, 0.2 arcsec (see the CIP rows above).
   At 2026 that term is -5.9e-11 rad, and it changes W by the same amount.
 - **FINALS2000A LOD flag (fixed).** `FINALS2000A_COLUMNS` read the LOD flag
   from column 79. The readme leaves that column blank, so LOD was never read
@@ -179,9 +247,14 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   the geocentric term is checked. Topocentric terms and dates outside
   2000-2026 are untested.
 - **Nutation beyond IAU 2000A_R06.** IAU 2000B is not implemented. The
-  complementary terms of the equation of the origins (Table 5.2e) are not
-  implemented, so GAST and the equation of the equinoxes differ from the full
-  model by up to 2.65 mas. s' and the CIP and CIO (X, Y, s) are not implemented.
+  complementary terms of the equation of the origins (Table 5.2e) are
+  implemented in `cio` but not used by GAST or the equation of the equinoxes, so
+  those differ from the full model by up to 2.65 mas.
+- **CIP and CIO beyond IAU 2006/2000A.** The X, Y and s series are the IAU
+  2006/2000A tables only. IAU 2000B is not implemented. The TIO locator is the
+  secular value (Eq. 5.13). The polar-motion dependent part (Eqs. 5.4 and 5.12)
+  is not computed. Polar motion and UT1 are inputs, and no IERS data is bundled.
+  The chain is checked against ERFA with polar motion of 0.1 and 0.2 arcsec only.
 - **Precession beyond zeta_A, z_A, theta_A and P(t).** The Fukushima-Williams
   angles (`erfa.pfw06`) and the frame-bias-included matrix (`erfa.pmat06`) are
   not compared. Precession was validated only in the bias-free form.
@@ -189,7 +262,8 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   true-of-date equator is checked only through the ICRS to true-equator helper,
   which has no frame bias.
 - **Earth orientation.** The polar-motion matrix is compared only with s' = 0,
-  because the crate omits s'. UT1-UTC and the `finals2000A` interpolation are
+  because `polar_motion_matrix` omits s'. The chain in `cio` includes s'.
+  UT1-UTC and the `finals2000A` interpolation are
   not compared with IERS data. The `finals2000A` parser is checked against the
   readme column table, not against a data file. The GMST and ERA tests use
   UT1-UTC = 0 as specified.
