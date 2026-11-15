@@ -1,0 +1,34 @@
+[package]
+name = "tpt-planetary-py"
+description = "PyO3 bindings for tpt-planetary (Python package: tpt-planetary)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+publish = false
+
+[lib]
+# cdylib is what maturin packages as a Python extension module.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# Enabled by maturin (see pyproject.toml). Leaves Python symbols unresolved
+# at link time so the extension can load into any interpreter.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+tpt-planetary-core.workspace = true
+tpt-planetary-array.workspace = true
+tpt-planetary-astro.workspace = true
+# MIT OR Apache-2.0. abi3-py39 gives one stable-ABI wheel per platform for
+# CPython 3.9 and newer.
+pyo3 = { version = "0.30.1", features = ["abi3-py39"] }
+# BSD-2-Clause (rust-numpy).
+numpy = "0.30.0"
+
+[lints]
+workspace = true

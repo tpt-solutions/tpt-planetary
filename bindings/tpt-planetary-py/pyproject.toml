@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tpt-planetary"
+version = "0.1.0"
+description = "Time scales, sky coordinates, WCS and chunked Zarr arrays for Earth and space science (PyO3 bindings)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "TPT Solutions" }]
+keywords = ["astronomy", "time-scales", "wcs", "zarr", "coordinates"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+# numpy is needed at runtime: the extension exchanges float64 arrays with it.
+dependencies = ["numpy>=1.23"]
+
+[project.urls]
+Repository = "https://github.com/tpt-solutions/tpt-planetary"
+Homepage = "https://github.com/tpt-solutions/tpt-planetary"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "tpt_planetary._core"
+python-source = "python"
+features = ["extension-module"]
+# Build a stable-ABI (abi3) wheel: one wheel per platform for CPython >= 3.9.
