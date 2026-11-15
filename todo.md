@@ -136,7 +136,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [ ] UT1 and Earth Orientation Parameters (IERS Bulletin A/B/C04 parsing; bundled snapshot + user-supplied data) — PARTIAL: finals2000A parser with a column map from memory; no bundled snapshot; no UT1 scale type
 - [ ] TDB <-> TT (Fairhead & Bretagnon series, high precision) — PARTIAL: leading 3 terms in astro; full series open
 - [x] Earth Rotation Angle, GMST, GAST
-- [ ] Validate against SOFA/ERFA published vectors and Astropy outputs (as test data only)
+- [ ] Validate against SOFA/ERFA published vectors and Astropy outputs (as test data only) — PARTIAL: checked against pyerfa 2.0.1.5 and astropy 8.0.2 (see docs/validation.md): leap steps, ERA, GMST, obliquity, ICRS-Galactic and WCS pass; TT-TDB differs by up to 14.9 us (3-term series); SPK, nutation and precession not validated
 
 ### Coordinate frames
 - [x] Frame trait / transformation graph (typed frames, attributes such as obstime/location)
@@ -148,7 +148,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [ ] ICRS <-> CIRS <-> TIRS/ITRS
 - [x] Local Horizontal (Alt/Az) with optional atmospheric refraction
 - [ ] FK5 / FK4 legacy frames (decide scope)
-- [ ] Accuracy tests (target: sub-milliarcsecond vs SOFA vectors)
+- [ ] Accuracy tests (target: sub-milliarcsecond vs SOFA vectors) — PARTIAL: no SOFA vectors; the ERFA-based checks in docs/validation.md give sub-mas agreement for ERA, GMST and obliquity only
 
 ### Ephemeris (JPL DE440)
 - [x] DE440/DE440s binary (SPK/DAF) file format parser
@@ -228,12 +228,12 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [ ] xarray / Dask integration (backend entrypoint or adapter) and SunPy/Astropy interop notes
 - [ ] Async/GIL handling for S3 streaming — PARTIAL: GIL released for reads and reductions; no S3 streaming
 - [x] Type stubs (`.pyi`) and Python tests (pytest)
-- [ ] Wheels for manylinux/musllinux, macOS (x86_64, arm64), Windows via CI
+- [ ] Wheels for manylinux/musllinux, macOS (x86_64, arm64), Windows via CI — PARTIAL: wheel and sdist workflow written in .github/workflows/wheels.yml, not yet run on a CI runner; the sdist may not package the sibling crates
 - [ ] Jupyter example notebook (the climate data-flow example with Matplotlib)
 
 ### Benchmarks & validation
 - [ ] Benchmarks vs xarray/netCDF4 (open, slice, mean, S3 streaming)
-- [ ] Benchmarks vs Astropy (time conversion, frame transforms, ephemeris)
+- [ ] Benchmarks vs Astropy (time conversion, frame transforms, ephemeris) — PARTIAL: time conversion and frame transform benchmarks done against astropy (docs/benchmarks.md); no ephemeris comparison
 - [ ] Publish reproducible benchmark methodology and results
 - [ ] End-to-end test of spec section 7 data-flow example — PARTIAL: scaled-down test on synthetic data; no SPK kernel, so no kernel-based ephemeris check
 - [ ] Final licence/dependency audit (`cargo deny`, SBOM, third-party notices) — PARTIAL: cargo deny fails on target-lexicon (licence decision pending)
@@ -273,9 +273,9 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [ ] Decide handling and redistribution of IERS EOP data and JPL DE440 files (size, licence/terms)
 - [ ] 12-month solo timeline is aggressive; re-plan at end of each phase
 - [x] Leap-second table checked against IERS `leap-seconds.list` (all 28 entries match); `valid_until` set to 2027-06-28 from that file's expiry line. Re-check before each release, because after expiry UTC conversions return `LeapSecondTableExpired`.
-- [ ] Verify the constants, the Galactic-pole constants, the TDB terms, the IAU 2006 obliquity coefficients and the Earth-Sun coefficients against primary sources (IERS, IAU, CODATA, Fairhead & Bretagnon). All were written from memory and are unvalidated. (The 28 TAI-UTC entries are now checked against the IERS list.)
+- [ ] Verify the Earth-Sun coefficients and the TDB series beyond three terms against primary sources (IERS, IAU, CODATA, Fairhead & Bretagnon). All were written from memory and are unvalidated. (The 28 TAI-UTC entries are now checked against the IERS list.)
 - [ ] Check `FINALS2000A_COLUMNS` in `tpt-planetary-astro/src/eop.rs` against the IERS finals2000A readme. The column positions were written from memory.
 - [ ] Rename or fix `icrs_to_ecliptic_at_epoch` in `tpt-planetary-astro/src/frames.rs`. It rotates by the epoch obliquity but keeps the J2000 equinox, so it is not the mean ecliptic of date.
-- [ ] Check the W = R2(xp) R1(yp) polar-motion sign convention in astro against a reference.
+- [ ] Check the W = R2(xp) R1(yp) polar-motion sign convention in astro against a reference. (not validated: the sign and convention are not checked against a reference yet, and pyerfa does not cover the polar-motion matrix directly)
 - [ ] **Licence decision:** `cargo deny check` fails on `target-lexicon` 0.13.6 (Apache-2.0 WITH LLVM-exception, a build-time dependency of PyO3). The spec bans Apache-2.0-only licences. Options: a narrowly scoped `deny.toml` exception with a written rationale, or a different policy. Not changed without your decision.
 - [ ] Library bugs fixed in this pass, with the remaining gaps: `to_calendar` and `Epoch::to_civil` now return `Result` and reject |day| > 5e11 (a 1e12 limit overflowed the i32 year). Array chunk geometry uses saturating multiplies; WCS longitude folds 360.0 to 0.0. Regression tests cover the calendar only; the array and WCS cases have no test yet.
