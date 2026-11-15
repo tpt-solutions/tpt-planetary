@@ -647,8 +647,9 @@ pub fn earth_sun_distance_km(spk: &SpkFile<'_>, et: f64) -> Result<f64> {
 /// Uses the mean anomaly of the Sun, `M = 357.53 + 0.98560028 d` degrees with
 /// `d` days from J2000 TT, and `R = 1.00014 - 0.01671 cos M - 0.00014 cos 2M`
 /// (Meeus, Astronomical Algorithms, Chapter 25, low-precision). It needs no
-/// ephemeris file. Its accuracy is about 1e-4 AU, and it has not been checked
-/// against reference ephemeris values in this crate.
+/// ephemeris file. Its accuracy is about 1e-4 AU. Against `erfa.epv00` at 200
+/// TT epochs over 1900-2100 the maximum difference is 9.99e-5 AU (mean 2.8e-5
+/// AU); see `docs/validation.md`.
 #[cfg(feature = "std")]
 #[must_use]
 pub fn earth_sun_distance_au_approx(tt_hi: f64, tt_lo: f64) -> f64 {

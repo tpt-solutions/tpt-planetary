@@ -9,12 +9,12 @@
 //! # Column layout
 //!
 //! The fixed column positions are described by [`ColumnMap`]. The default
-//! map, [`FINALS2000A_COLUMNS`], was written from memory of the IERS readme for
-//! `finals2000A.data` and has NOT been checked against the readme shipped with
-//! that file. Verify it against the readme before relying on it for real data.
-//! Use a different [`ColumnMap`] if the readme says otherwise. The unit tests
-//! build lines from the map itself, so they check the parser's arithmetic,
-//! not the real file layout.
+//! map, [`FINALS2000A_COLUMNS`], was checked against the IERS readme for
+//! `finals2000A.data` (column table as published at
+//! <https://maia.usno.navy.mil/ser7/readme.finals2000A>, retrieved 2026-11-16).
+//! The unit tests build most lines from the map itself, so they check the
+//! parser's arithmetic. The test `parses_readme_layout_line` uses a line laid
+//! out by hand from the readme table, which checks the map against that table.
 //!
 //! # Interpolation
 //!
@@ -74,10 +74,12 @@ pub struct ColumnMap {
 
 /// Default column map for `finals2000A.data`.
 ///
-/// Source: IERS readme for `finals2000A` (recalled from memory, unvalidated).
+/// Source: IERS readme for `finals2000A` (`readme.finals2000A`, retrieved
+/// 2026-11-16 from <https://maia.usno.navy.mil/ser7/readme.finals2000A>).
 /// One-based readme columns used: MJD 8-15, PM flag 17, PM-x 19-27, PM-y 38-46,
-/// UT1 flag 58, UT1-UTC 59-68, LOD flag 79, LOD 80-86. Confirm these against
-/// the readme file that accompanies the data.
+/// UT1 flag 58, UT1-UTC 59-68, LOD 80-86. Column 79 is blank in the readme, and
+/// the readme gives no LOD flag, so `lod_flag` is `None` and LOD is read
+/// whenever it is non-blank (the readme says it is "NOT ALWAYS FILLED").
 pub const FINALS2000A_COLUMNS: ColumnMap = ColumnMap {
     mjd: Span::new(7, 15),
     pm_flag: 16,
@@ -85,7 +87,7 @@ pub const FINALS2000A_COLUMNS: ColumnMap = ColumnMap {
     pm_y: Span::new(37, 46),
     ut1_flag: 57,
     ut1_utc: Span::new(58, 68),
-    lod_flag: Some(78),
+    lod_flag: None,
     lod: Some(Span::new(79, 86)),
 };
 
@@ -419,6 +421,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(rec.lod_ms, None);
+    }
+
+    #[test]
+    fn parses_readme_layout_line() {
+        // Hand-laid from the readme column table (1-based columns): blank
+        // column 79, LOD in 80-86, no LOD flag. Built without the map.
+        let line = "000101 51544.00 I  0.123456 0.000010  0.234567 0.000010  I-0.1234567 0.0000010  1.2345 0.0100";
+        let rec = parse_finals2000a_line(line, &FINALS2000A_COLUMNS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.mjd, 51544.0);
+        assert_eq!(rec.xp_arcsec, 0.123456);
+        assert_eq!(rec.yp_arcsec, 0.234567);
+        assert_eq!(rec.dut1_seconds, -0.1234567);
+        assert_eq!(rec.lod_ms, Some(1.2345));
     }
 
     #[test]

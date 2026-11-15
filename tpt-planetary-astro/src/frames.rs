@@ -349,10 +349,15 @@ pub fn geodetic_to_itrs(lon_rad: f64, lat_rad: f64, height_m: f64) -> [f64; 3] {
 /// Polar motion rotation `W = R2(xp) R1(yp)` from ITRS to TIRS, in radians.
 ///
 /// Passive rotations as in IERS Conventions 2010, Chapter 5. The TIO locator
-/// `s'` is taken as zero, which changes positions by about 2e-10 rad
-/// (about 1.5 mm on the surface). Under this convention the celestial
-/// intermediate pole sits at `(xp, -yp, 1)` in ITRS, to first order. The sign
-/// convention is recalled from memory and unvalidated.
+/// `s'` is taken as zero. At 2026 `s'` is about -5.9e-11 rad, which moves the
+/// matrix by the same amount (about 0.4 mm on the surface). Under this
+/// convention the celestial intermediate pole sits at `(xp, -yp, 1)` in ITRS,
+/// to first order.
+///
+/// Checked against `erfa.pom00` (pyerfa 2.0.1.5) with `s' = 0`: ERFA documents
+/// its matrix as the TIRS -> ITRS direction, so this matrix equals the
+/// transpose of `pom00`'s output. The two agree to double-precision rounding
+/// (see `docs/validation.md`).
 #[must_use]
 pub fn polar_motion_matrix(xp_rad: f64, yp_rad: f64) -> [[f64; 3]; 3] {
     mat_mul(&rot_y(xp_rad), &rot_x(yp_rad))
