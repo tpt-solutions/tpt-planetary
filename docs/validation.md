@@ -10,7 +10,7 @@ beyond that, and they are not a claim about the full algorithms.
 
 | Package | Version | Used for |
 | --- | --- | --- |
-| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06` |
+| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00` |
 | astropy | 8.0.2 | `LeapSeconds.from_iers_leap_seconds` (bundled list, read offline), `SkyCoord` (ICRS, Galactic, `BarycentricMeanEcliptic`, `GeocentricMeanEcliptic`), `astropy.wcs.WCS` (wcslib) |
 | numpy | 2.5.4 | sampling and vector arithmetic |
 
@@ -41,6 +41,11 @@ passing, so the status cannot drift silently.
 | WCS TAN, RA/Dec, high dec, LONPOLE default | `astropy.wcs.WCS` (wcslib, astropy 8.0.2) | 2000 pixels; 2000 sky points within 6 deg | pix -> world 6.6e-14 deg; world -> pix 1.1e-10 px | 1e-9 deg; 1e-6 px | pass |
 | WCS SIN, CD matrix with rotation | same | 2000 pixels; 2000 sky points within 6 deg | pix -> world 6.6e-14 deg; world -> pix 9.9e-10 px | 1e-9 deg; 1e-6 px | pass |
 | WCS AIT, dec0 = -60, LONPOLE default 180 | same | 2000 pixels (1244 inside the domain); 2000 sky points | pix -> world 1.4e-13 deg; world -> pix 2.0e-13 px (edge points excluded) | 1e-9 deg; 1e-6 px | pass (after fix) |
+| Polar-motion matrix W (ITRS -> TIRS), s' = 0 | `erfa.pom00` (pyerfa 2.0.1.5), transposed (ERFA documents `pom00` as TIRS -> ITRS) | 205 (xp, yp) points in arcsec: 5 fixed with both signs, 200 seeded random in [-1, 1] | 0.0 against the transpose; 9.7e-6 without it | 1e-12; untransposed must differ by more than 1e-6 | pass |
+| Earth-Sun distance, `earth_sun_distance_au_approx` (Meeus low-precision series) | `erfa.epv00` (pyerfa 2.0.1.5), norm of the heliocentric Earth position | 200 TT epochs, 1900-01-01 to 2100-01-01 | 9.99e-5 AU (14 951 km); mean 2.8e-5 AU (4 144 km) | 1e-4 AU (the helper's stated accuracy) | pass (margin 0.06%) |
+
+Polar motion and Earth-Sun use `validation_dump` modes `pm` and `esd`, and their
+tests are in `bindings/tpt-planetary-py/tests/validation/test_earth_orientation.py`.
 
 ### Findings
 
@@ -67,6 +72,25 @@ passing, so the status cannot drift silently.
 - **TDB (xfail, not changed).** The three leading terms leave residuals up to
   14.9 us. The crate documents this as an approximation. The regression guard
   keeps it from growing past 20 us.
+- **Polar motion sign convention (confirmed, not changed).** The crate's W
+  (`polar_motion_matrix`, `W = R2(xp) R1(yp)`) equals the transpose of
+  `erfa.pom00(xp, yp, 0)` to double precision. ERFA's note says its matrix
+  satisfies V(TRS) = rpom V(CIP), so `pom00` maps TIRS to ITRS and W is the
+  ITRS -> TIRS direction. The physical check agrees: the CIP sits at
+  `(xp, -yp, 1)` in ITRS, to first order. The existing test
+  `polar_motion_maps_cip_to_tirs_z_axis` covers this. The matrix omits s'.
+  At 2026 that term is -5.9e-11 rad, and it changes W by the same amount.
+- **FINALS2000A LOD flag (fixed).** `FINALS2000A_COLUMNS` read the LOD flag
+  from column 79. The readme leaves that column blank, so LOD was never read
+  from a real row. The map now has no LOD flag. The other columns (MJD, PM
+  flag, PM-x, PM-y, UT1 flag, UT1-UTC, LOD) match the readme table, retrieved
+  2026-11-16. The regression test is `parses_readme_layout_line`. No
+  `finals2000A.data` file was parsed, because none is bundled and the check
+  used the readme column table only.
+- **Earth-Sun helper (checked to its stated accuracy).** The Meeus series
+  agrees with `erfa.epv00` to 9.99e-5 AU over 1900-2100. This is inside the
+  1e-4 AU the crate documents, with a small margin. The SPK-based
+  `earth_sun_distance_km` is not covered by this check.
 - **Galactic.** The 0.025 arcsec difference is inside the bound from the
   published constants: each of the three constants (pole RA and Dec, node) is
   rounded to 5 decimals, up to 18 mas each, and the ICRS and FK5-J2000 pole
@@ -81,12 +105,14 @@ passing, so the status cannot drift silently.
   the equation of the equinoxes and the true obliquity are not checked. GAST is
   not compared.
 - **Precession.** Not implemented and not compared.
-- **Earth orientation.** Polar motion, UT1-UTC and the `finals2000A` parser are
-  not compared with IERS data. The GMST and ERA tests use UT1-UTC = 0 as
-  specified.
+- **Earth orientation.** The polar-motion matrix is compared only with s' = 0,
+  because the crate omits s'. UT1-UTC and the `finals2000A` interpolation are
+  not compared with IERS data. The `finals2000A` parser is checked against the
+  readme column table, not against a data file. The GMST and ERA tests use
+  UT1-UTC = 0 as specified.
 - **Ephemerides.** The SPK/DAF reader, Chebyshev evaluation and light time are
   not validated against JPL. The required kernels are not in this repository.
-- **Other frames.** ICRS -> AltAz and ITRS/geodetic conversions are not compared.
+  `earth_sun_distance_km` (SPK) is not compared; only the analytic helper is.- **Other frames.** ICRS -> AltAz and ITRS/geodetic conversions are not compared.
 - **WCS scope.** Only TAN, SIN and AIT, with LONPOLE and LATPOLE left to their
   defaults. Explicit LONPOLE and LATPOLE values, the PC and CD mix, SIP, TPV,
   alternative descriptions and other projections are not compared. The antimeridian

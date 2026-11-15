@@ -7,10 +7,15 @@
 //! - `tdb`: `tt_hi tt_lo` -> TDB - TT in seconds.
 //! - `obl`: `tt_hi tt_lo` -> IAU 2006 mean obliquity in arcseconds.
 //! - `ecl`: `ra_deg dec_deg` -> J2000 mean ecliptic `lon_deg lat_deg`.
+//! - `pm`: `xp_arcsec yp_arcsec` -> the nine elements of the polar-motion
+//!   matrix `W` (ITRS -> TIRS, row-major), with s' = 0.
+//! - `esd`: `tt_hi tt_lo` -> low-precision Earth-Sun distance in AU.
 
 use std::io::{self, BufRead, Write};
 
-use tpt_planetary_astro::frames::{Icrs, MeanEcliptic, SkyCoord};
+use tpt_planetary_astro::eop::ARCSEC_TO_RAD;
+use tpt_planetary_astro::ephemeris::earth_sun_distance_au_approx;
+use tpt_planetary_astro::frames::{Icrs, MeanEcliptic, SkyCoord, polar_motion_matrix};
 use tpt_planetary_astro::time;
 
 fn parse_fields(line: &str, n: usize) -> Option<Vec<f64>> {
@@ -41,6 +46,17 @@ fn main() {
                 let c = SkyCoord::<Icrs>::from_degrees(v[0], v[1]).transform_to::<MeanEcliptic>();
                 format!("{} {}", c.lon_deg(), c.lat_deg())
             }),
+            "pm" => parse_fields(&line, 2).map(|v| {
+                let w = polar_motion_matrix(v[0] * ARCSEC_TO_RAD, v[1] * ARCSEC_TO_RAD);
+                w.iter()
+                    .flatten()
+                    .map(f64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }),
+            "esd" => {
+                parse_fields(&line, 2).map(|v| earth_sun_distance_au_approx(v[0], v[1]).to_string())
+            }
             _ => None,
         };
         match result {
