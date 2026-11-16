@@ -1,8 +1,13 @@
-//! `tptplan astro convert`: conversion between UTC, TAI and TT.
+//! `tptplan astro convert`: conversion between UTC, TAI and TT, and between
+//! the ICRS, Galactic and mean J2000 ecliptic frames.
 //!
-//! Only the time scales implemented in `tpt-planetary-core` are supported.
-//! TDB and coordinate frames are reported as not implemented (exit 3).
+//! Time scales are the ones implemented in `tpt-planetary-core`. Frame
+//! conversions use the public `FrameTransform` impls of `tpt-planetary-astro`:
+//! ICRS to and from Galactic, and ICRS to and from the mean ecliptic of J2000.
+//! Galactic to ecliptic goes through ICRS. Coordinates are `LON,LAT` in
+//! degrees. Other frames and TDB are reported as not implemented (exit 3).
 
+use tpt_planetary_astro::frames::{Galactic, Icrs, MeanEcliptic, SkyCoord};
 use tpt_planetary_core::Error as CoreError;
 use tpt_planetary_core::jd::JulianDate;
 use tpt_planetary_core::leap::EMBEDDED;
@@ -11,6 +16,90 @@ use tpt_planetary_core::scale::{CivilTime, Epoch, Tai, Tt, Utc};
 use crate::iso::{format_timestamp, parse_timestamp};
 use crate::json;
 use crate::{EXIT_NOT_IMPLEMENTED, EXIT_RUNTIME, EXIT_USAGE, Failure, OutputFormat};
+
+/// A coordinate frame supported by `astro convert`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameName {
+    Icrs,
+    Galactic,
+    /// Mean ecliptic of J2000.
+    Ecliptic,
+}
+
+impl FrameName {
+    fn label(self) -> &'static str {
+        match self {
+            FrameName::Icrs => "ICRS",
+            FrameName::Galactic => "GALACTIC",
+            FrameName::Ecliptic => "ECLIPTIC",
+        }
+    }
+}
+
+/// The supported frame called `name`, if it is one.
+fn frame_name(name: &str) -> Option<FrameName> {
+    match name.to_ascii_lowercase().as_str() {
+        "icrs" => Some(FrameName::Icrs),
+        "galactic" => Some(FrameName::Galactic),
+        "ecliptic" => Some(FrameName::Ecliptic),
+        _ => None,
+    }
+}
+
+/// Parses `LON,LAT` in degrees.
+fn parse_pair(value: &str) -> Result<(f64, f64), Failure> {
+    let usage = || {
+        Failure::new(
+            EXIT_USAGE,
+            format!(
+                "cannot read coordinates '{value}': expected LON,LAT in degrees, e.g. 10.5,-20"
+            ),
+        )
+    };
+    let (lon, lat) = value.split_once(',').ok_or_else(usage)?;
+    let lon: f64 = lon.trim().parse().map_err(|_| usage())?;
+    let lat: f64 = lat.trim().parse().map_err(|_| usage())?;
+    if !lon.is_finite() || !lat.is_finite() {
+        return Err(usage());
+    }
+    Ok((lon, lat))
+}
+
+/// Converts a `LON,LAT` pair between two supported frames.
+fn frame_convert(
+    value: &str,
+    from: FrameName,
+    to: FrameName,
+    format: OutputFormat,
+) -> Result<String, Failure> {
+    let (lon, lat) = parse_pair(value)?;
+    let icrs: SkyCoord<Icrs> = match from {
+        FrameName::Icrs => SkyCoord::from_degrees(lon, lat),
+        FrameName::Galactic => SkyCoord::<Galactic>::from_degrees(lon, lat).transform_to::<Icrs>(),
+        FrameName::Ecliptic => {
+            SkyCoord::<MeanEcliptic>::from_degrees(lon, lat).transform_to::<Icrs>()
+        }
+    };
+    let (out_lon, out_lat) = match to {
+        FrameName::Icrs => (icrs.lon_deg(), icrs.lat_deg()),
+        FrameName::Galactic => {
+            let c = icrs.transform_to::<Galactic>();
+            (c.lon_deg(), c.lat_deg())
+        }
+        FrameName::Ecliptic => {
+            let c = icrs.transform_to::<MeanEcliptic>();
+            (c.lon_deg(), c.lat_deg())
+        }
+    };
+    Ok(match format {
+        OutputFormat::Table => format!("{out_lon},{out_lat} {}", to.label()),
+        OutputFormat::Json => json::object(&[
+            ("frame", json::string(to.label())),
+            ("lon_deg", out_lon.to_string()),
+            ("lat_deg", out_lat.to_string()),
+        ]),
+    })
+}
 
 /// Names of scales and frames that are known but not implemented yet.
 const UNIMPLEMENTED: &[&str] = &[
@@ -129,6 +218,20 @@ pub fn convert_command(
     to: &str,
     format: OutputFormat,
 ) -> Result<String, Failure> {
+    match (frame_name(from), frame_name(to)) {
+        (Some(f), Some(t)) => return frame_convert(value, f, t, format),
+        (Some(_), None) | (None, Some(_)) => {
+            // Mixing a frame with a time scale: report the other side's error
+            // if it is unknown or unimplemented, otherwise the mismatch.
+            let other = if frame_name(from).is_some() { to } else { from };
+            parse_scale(other)?;
+            return Err(Failure::new(
+                EXIT_USAGE,
+                format!("cannot convert between the coordinate frame and the time scale '{other}'"),
+            ));
+        }
+        (None, None) => {}
+    }
     let from = parse_scale(from)?;
     let to = parse_scale(to)?;
     let ct = parse_timestamp(value).map_err(|m| Failure::new(EXIT_USAGE, m))?;

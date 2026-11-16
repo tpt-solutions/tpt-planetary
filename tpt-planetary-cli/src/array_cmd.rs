@@ -5,7 +5,7 @@
 //! supported in this build and return exit 3. `array convert` and `array math`
 //! are not implemented and are reported from `main.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tpt_planetary_array::meta::{ArrayMetadata, NodeMetadata, ZarrFormat};
@@ -37,6 +37,48 @@ fn display_path(path: &Path) -> String {
     match s.strip_prefix(r"\\?\") {
         Some(rest) => rest.to_string(),
         None => s,
+    }
+}
+
+/// Rejects remote locations (`scheme://`) with exit code 3.
+pub(crate) fn reject_remote(uri: &str) -> Result<(), Failure> {
+    match uri_scheme(uri) {
+        Some(scheme) => Err(Failure::new(
+            EXIT_NOT_IMPLEMENTED,
+            format!(
+                "'{scheme}://' locations are not supported in this build; \
+                 only local paths can be used"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Splits a local path into the directory that holds it and its final name,
+/// which is the Zarr node name inside a store rooted at that directory.
+pub(crate) fn split_location(path: &str) -> Result<(PathBuf, String), Failure> {
+    let p = Path::new(path);
+    let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        Failure::new(EXIT_USAGE, format!("cannot determine a name from '{path}'"))
+    })?;
+    let parent = match p.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    Ok((parent, name.to_string()))
+}
+
+/// Chunk shape for a new array: each edge is at most 512, and a chunk holds
+/// at most 2^20 elements so that one chunk fits comfortably in memory.
+pub(crate) fn default_chunks(shape: &[u64]) -> Vec<u64> {
+    let mut edge: u64 = 512;
+    loop {
+        let chunk: Vec<u64> = shape.iter().map(|&n| n.min(edge).max(1)).collect();
+        let elements: u64 = chunk.iter().product();
+        if elements <= 1 << 20 || edge == 1 {
+            return chunk;
+        }
+        edge /= 2;
     }
 }
 

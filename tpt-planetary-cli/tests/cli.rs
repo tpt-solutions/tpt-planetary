@@ -160,17 +160,6 @@ fn astro_convert_bad_timestamp_is_usage_error() {
 }
 
 #[test]
-fn array_math_and_convert_are_not_implemented() {
-    let math = tptplan(&["array", "math", "a + b"]);
-    assert_eq!(code(&math), EXIT_NOT_IMPLEMENTED);
-    assert!(stderr(&math).contains("array math is not implemented"));
-
-    let convert = tptplan(&["array", "convert", "in.nc", "out.zarr"]);
-    assert_eq!(code(&convert), EXIT_NOT_IMPLEMENTED);
-    assert!(stderr(&convert).contains("array convert is not implemented"));
-}
-
-#[test]
 fn remote_array_locations_are_not_implemented() {
     for uri in [
         "s3://bucket/temperature.zarr",
@@ -187,11 +176,66 @@ fn remote_array_locations_are_not_implemented() {
 }
 
 #[test]
-fn non_time_scales_are_not_implemented() {
+fn icrs_origin_converts_to_galactic() {
+    // ICRS (RA 0, Dec 0) is Galactic (l, b) of about (96.33722, -60.18855) degrees.
     let out = tptplan(&[
-        "astro", "convert", "10,20", "--from", "icrs", "--to", "galactic",
+        "astro", "convert", "0,0", "--from", "icrs", "--to", "galactic",
     ]);
+    assert_eq!(code(&out), EXIT_OK);
+    let text = stdout(&out);
+    let mut parts = text.split_whitespace().next().unwrap().split(',');
+    let l: f64 = parts.next().unwrap().parse().unwrap();
+    let b: f64 = parts.next().unwrap().parse().unwrap();
+    assert!((l - 96.33722).abs() < 1e-4, "l = {l}");
+    assert!((b + 60.18855).abs() < 1e-4, "b = {b}");
+    assert!(text.trim_end().ends_with("GALACTIC"));
+
+    // Galactic back to ICRS recovers the origin.
+    let back = tptplan(&[
+        "astro",
+        "convert",
+        &format!("{l},{b}"),
+        "--from",
+        "galactic",
+        "--to",
+        "icrs",
+    ]);
+    assert_eq!(code(&back), EXIT_OK);
+    let mut parts = stdout(&back)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .split(',')
+        .map(|s| s.parse::<f64>().unwrap())
+        .collect::<Vec<_>>();
+    let (ra, dec) = (parts.remove(0), parts.remove(0));
+    assert!(
+        ra.min(360.0 - ra) < 1e-9 && dec.abs() < 1e-9,
+        "ra {ra}, dec {dec}"
+    );
+}
+
+#[test]
+fn frame_conversion_json_and_unimplemented_frames() {
+    let out = tptplan(&[
+        "--format", "json", "astro", "convert", "10,20", "--from", "icrs", "--to", "ecliptic",
+    ]);
+    assert_eq!(code(&out), EXIT_OK);
+    assert!(stdout(&out).contains(r#""frame": "ECLIPTIC""#));
+
+    // Frames without an implemented transform are still not implemented.
+    let out = tptplan(&["astro", "convert", "10,20", "--from", "icrs", "--to", "fk5"]);
     assert_eq!(code(&out), EXIT_NOT_IMPLEMENTED);
+
+    // A frame cannot be converted to a time scale.
+    let out = tptplan(&["astro", "convert", "10,20", "--from", "icrs", "--to", "tt"]);
+    assert_eq!(code(&out), EXIT_USAGE);
+
+    // Coordinates must be LON,LAT.
+    let out = tptplan(&[
+        "astro", "convert", "10", "--from", "icrs", "--to", "galactic",
+    ]);
+    assert_eq!(code(&out), EXIT_USAGE);
 }
 
 #[test]

@@ -1,11 +1,13 @@
 //! `tptplan`: command-line front end for tpt-planetary.
 //!
 //! Global flags (`--verbose`, `--format json|table`), shell completions, man
-//! pages and exit codes are implemented here. `array inspect`, `astro convert`
-//! and `ephemeris query` are implemented in their own modules; `array convert`
-//! and `array math` report not implemented.
+//! pages and exit codes are implemented here. `array inspect`, `array convert`,
+//! `array math`, `astro convert` and `ephemeris query` are implemented in their
+//! own modules.
 
 mod array_cmd;
+mod array_convert;
+mod array_math;
 mod astro_cmd;
 mod ephemeris_cmd;
 mod iso;
@@ -110,22 +112,82 @@ pub enum ArrayCommand {
         /// Array location: a local path, `s3://`, or `https://` URI.
         uri: String,
     },
-    /// Evaluate an expression lazily and write the result.
+    /// Evaluate an expression over named Zarr arrays and write a Zarr array.
+    #[command(long_about = MATH_LONG_ABOUT)]
     Math {
-        /// Expression to evaluate.
+        /// Expression to evaluate (see the grammar below).
         expression: String,
-        /// Output location (Zarr or NetCDF3).
+        /// Named input array, as NAME=PATH to a local Zarr array directory.
+        /// Repeat for each name used in the expression.
+        #[arg(long = "input", value_name = "NAME=PATH")]
+        inputs: Vec<String>,
+        /// Output Zarr array directory. Must not exist yet. Written as float64.
         #[arg(short, long)]
-        output: Option<String>,
-    },
-    /// Convert between Zarr and NetCDF3.
-    Convert {
-        /// Input location.
-        input: String,
-        /// Output location.
         output: String,
+        /// Zarr format of the output: 2 or 3.
+        #[arg(long, value_name = "2|3", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=3))]
+        zarr_format: u8,
+    },
+    /// Convert between Zarr and NetCDF-3 (.nc).
+    #[command(long_about = CONVERT_LONG_ABOUT)]
+    Convert {
+        /// Input: a .nc file, or a local Zarr array or group directory.
+        input: String,
+        /// Output: a Zarr directory (from a .nc input), or a .nc file (from
+        /// a Zarr input). Must not exist yet.
+        output: String,
+        /// Zarr format written from a NetCDF-3 input: 2 or 3.
+        #[arg(long, value_name = "2|3", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=3))]
+        zarr_format: u8,
     },
 }
+
+/// Long help for `array math`: the expression grammar.
+const MATH_LONG_ABOUT: &str = "\
+Evaluates an arithmetic expression over named Zarr arrays and writes the \
+result as a float64 Zarr array. The arrays are combined lazily and written \
+chunk by chunk. Operands broadcast with NumPy rules, and numeric constants \
+broadcast to the shape of the other operand.
+
+GRAMMAR
+  expression := term (('+' | '-') term)*
+  term       := unary (('*' | '/') unary)*
+  unary      := '-' unary | primary
+  primary    := NUMBER | NAME | '(' expression ')'
+
+  NUMBER   digits with an optional fraction and exponent, such as 2, 0.5, 1e-3
+  NAME     a letter or '_' then letters, digits or '_'; each name needs an
+           --input NAME=PATH argument
+
+Unary minus binds tighter than '*' and '/', so -a * b is (-a) * b. Division
+follows IEEE rules. Fill-valued and NaN inputs give NaN in the output.
+
+EXAMPLE
+  tptplan array math \"(a - b) / 2 + 1\" --input a=run1/tas --input b=run2/tas \\
+      --output diff.zarr
+
+EXIT CODES
+  0 success, 1 runtime error (missing or unreadable input, I/O), 2 syntax or \
+usage error";
+
+/// Long help for `array convert`.
+const CONVERT_LONG_ABOUT: &str = "\
+Converts between a NetCDF-3 file and a Zarr directory. The direction comes \
+from the input: a .nc file is read as NetCDF-3, and a Zarr directory is read \
+as Zarr (an array, or a flat group of arrays). The output format comes from \
+the output path: a .nc path writes NetCDF-3, and anything else writes Zarr.
+
+A NetCDF-3 file becomes a Zarr group, with one array per variable named after \
+the variable. A Zarr array becomes a NetCDF-3 variable named after the \
+directory (without a .zarr suffix). Dimension names are kept. Unnamed axes \
+become dim{axis}_{length}. The _FillValue attribute and other text or numeric \
+attributes are kept. Attributes are written back as double values.
+
+SUPPORTED TYPES
+  int8, int16, int32, float32, float64 (NetCDF byte, short, int, float and \
+double). Unsigned and 64-bit integers, booleans and text are rejected. Variables \
+must have at least one dimension. Time variables stay as numbers: CF time \
+decoding is not applied. NetCDF-4 (HDF5) files are not supported.";
 
 /// `tptplan astro` subcommands.
 #[derive(Debug, Subcommand)]
@@ -187,11 +249,6 @@ fn finish(result: Result<String, Failure>) -> ExitCode {
 }
 
 /// Reports a subcommand that is not implemented in this build.
-fn not_implemented(message: &str) -> ExitCode {
-    eprintln!("tptplan: {message}");
-    ExitCode::from(EXIT_NOT_IMPLEMENTED)
-}
-
 fn write_completions(shell: Shell) -> io::Result<()> {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
@@ -246,15 +303,28 @@ fn run(cli: Cli) -> ExitCode {
         },
         Command::Array { action } => match action {
             ArrayCommand::Inspect { uri } => finish(array_cmd::inspect(&uri, format, verbose)),
-            ArrayCommand::Math { .. } => not_implemented(
-                "array math is not implemented yet: there is no expression parser \
-                 (tpt-planetary-array has only the lazy Expr API) and no output writer \
-                 wired to the CLI",
-            ),
-            ArrayCommand::Convert { .. } => not_implemented(
-                "array convert is not implemented yet: tpt-planetary-array reads and \
-                 writes Zarr only, with no NetCDF3 reader or writer",
-            ),
+            ArrayCommand::Math {
+                expression,
+                inputs,
+                output,
+                zarr_format,
+            } => finish(array_math::math(
+                &expression,
+                &inputs,
+                &output,
+                zarr_format,
+                verbose,
+            )),
+            ArrayCommand::Convert {
+                input,
+                output,
+                zarr_format,
+            } => finish(array_convert::convert(
+                &input,
+                &output,
+                zarr_format,
+                verbose,
+            )),
         },
         Command::Astro { action } => match action {
             AstroCommand::Convert { value, from, to } => {
