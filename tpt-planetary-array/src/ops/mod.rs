@@ -1,6 +1,7 @@
 //! Map algebra on lazy expressions: broadcasting, elementwise operations,
 //! comparisons and `where`, axis-wise reductions, spherical area weighting,
-//! and rolling and block-resampling along one axis.
+//! rolling and block-resampling along one axis, and climatology and anomalies
+//! for a fixed period along one axis.
 //!
 //! Every operation builds a node in the [`Expr`](crate::Expr) graph. Nothing
 //! is computed until a reduction (for example `mean` or
@@ -22,6 +23,7 @@ pub(crate) mod simd;
 mod source;
 
 pub mod broadcast;
+pub mod climatology;
 pub mod elementwise;
 pub mod reduce;
 pub mod spherical;
@@ -83,7 +85,10 @@ mod tests {
         let source = Expr::from_array(array);
         let chain = source.mul_scalar(2.0).add_scalar(1.0);
         // Block of 3 rows x 8 columns: two chunks per block, aligned to chunks.
-        let options = EvalOptions { block_elements: 24 };
+        let options = EvalOptions {
+            block_elements: 24,
+            workers: 1,
+        };
 
         store.gets.store(0, Ordering::SeqCst);
         let (bare_stats, bare_exec) = source.stats_with(options).unwrap();
@@ -106,6 +111,7 @@ mod tests {
         let whole = chain
             .stats_with(EvalOptions {
                 block_elements: 1 << 20,
+                workers: 1,
             })
             .unwrap()
             .1;

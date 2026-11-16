@@ -7,6 +7,8 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[cfg(feature = "std")]
+use crate::cache::ChunkCache;
 use crate::codec::{Pipeline, Registry};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
@@ -21,13 +23,19 @@ use crate::store::{Store, join};
 /// An array stored in a [`Store`] under a path.
 ///
 /// The handle holds the parsed metadata and the codec pipeline; chunk data is
-/// only read when a read method is called.
+/// only read when a read method is called. With
+/// [`Array::with_chunk_cache`] the handle also keeps recently used decoded
+/// chunks in memory.
 pub struct Array {
     store: Arc<dyn Store>,
     path: alloc::string::String,
     meta: ArrayMetadata,
     grid: ChunkGrid,
     pipeline: Pipeline,
+    /// Decoded-chunk cache, present only when enabled (`std` feature: the
+    /// mutex that makes the handle `Sync` needs `std`).
+    #[cfg(feature = "std")]
+    chunk_cache: Option<std::sync::Mutex<ChunkCache>>,
 }
 
 impl core::fmt::Debug for Array {
@@ -56,7 +64,49 @@ impl Array {
             meta,
             grid,
             pipeline,
+            #[cfg(feature = "std")]
+            chunk_cache: None,
         })
+    }
+
+    /// Enables an LRU cache of decoded chunks holding at most `budget_bytes`
+    /// bytes. Reads that hit the cache do not call the store. Chunks written
+    /// through this handle are cached as they are written.
+    ///
+    /// The cache belongs to this handle. Writes made through another handle
+    /// (or directly to the store) are not seen until the cached entry is
+    /// evicted, so use one handle per array when caching. A chunk larger than
+    /// the budget is never cached.
+    #[cfg(feature = "std")]
+    pub fn with_chunk_cache(mut self, budget_bytes: usize) -> Self {
+        self.chunk_cache = Some(std::sync::Mutex::new(ChunkCache::new(budget_bytes)));
+        self
+    }
+
+    /// Bytes of decoded chunks currently held by the chunk cache, or `None`
+    /// when no cache is enabled.
+    #[cfg(feature = "std")]
+    pub fn chunk_cache_bytes(&self) -> Result<Option<usize>> {
+        match &self.chunk_cache {
+            None => Ok(None),
+            Some(cache) => Ok(Some(lock_cache(cache)?.used_bytes())),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn cache_get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let Some(cache) = &self.chunk_cache else {
+            return Ok(None);
+        };
+        Ok(lock_cache(cache)?.get(key).map(<[u8]>::to_vec))
+    }
+
+    #[cfg(feature = "std")]
+    fn cache_put(&self, key: &str, decoded: &[u8]) -> Result<()> {
+        if let Some(cache) = &self.chunk_cache {
+            lock_cache(cache)?.insert(key, decoded.to_vec());
+        }
+        Ok(())
     }
 
     /// Creates a new array at `path`, writing its metadata. Fails if a node
@@ -143,7 +193,14 @@ impl Array {
     /// chunk has never been written (its contents are the fill value).
     pub fn read_chunk(&self, coord: &[u64]) -> Result<Option<Vec<u8>>> {
         self.grid.check_coord(coord)?;
-        let Some(raw) = self.store.get(&self.chunk_key(coord))? else {
+        let key = self.chunk_key(coord);
+        #[cfg(feature = "std")]
+        {
+            if let Some(hit) = self.cache_get(&key)? {
+                return Ok(Some(hit));
+            }
+        }
+        let Some(raw) = self.store.get(&key)? else {
             return Ok(None);
         };
         let decoded = self.pipeline.decode(&raw)?;
@@ -153,6 +210,10 @@ impl Array {
                 expected,
                 actual: decoded.len(),
             });
+        }
+        #[cfg(feature = "std")]
+        {
+            self.cache_put(&key, &decoded)?;
         }
         Ok(Some(decoded))
     }
@@ -168,8 +229,14 @@ impl Array {
                 actual: data.len(),
             });
         }
+        let key = self.chunk_key(coord);
         let encoded = self.pipeline.encode(data)?;
-        self.store.set(&self.chunk_key(coord), &encoded)
+        self.store.set(&key, &encoded)?;
+        #[cfg(feature = "std")]
+        {
+            self.cache_put(&key, data)?;
+        }
+        Ok(())
     }
 
     /// Reads a selection into a new byte buffer in C order. Returns the output
@@ -280,6 +347,15 @@ impl Array {
         let plan = RegionPlan::new(&resolved, &self.meta.chunk_shape);
         Ok(plan.tasks().map(|t| t.coord).collect())
     }
+}
+
+#[cfg(feature = "std")]
+fn lock_cache(
+    cache: &std::sync::Mutex<ChunkCache>,
+) -> Result<std::sync::MutexGuard<'_, ChunkCache>> {
+    cache
+        .lock()
+        .map_err(|_| Error::Io("chunk cache lock poisoned".to_string()))
 }
 
 /// Offsets and counts for one chunk's contribution, expressed in elements.
@@ -462,6 +538,125 @@ mod tests {
             vec![4.0, 5.0]
         );
         assert!(a.read_chunk(&[2]).is_err());
+    }
+
+    /// Counts `get` calls that reach the underlying store.
+    struct CountingStore {
+        inner: MemoryStore,
+        gets: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingStore {
+        fn gets(&self) -> usize {
+            self.gets.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Store for CountingStore {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+        fn list(&self, prefix: &str) -> Result<Vec<String>> {
+            self.inner.list(prefix)
+        }
+    }
+
+    /// A 4x4 f64 array in 2x2 chunks (four chunks of 32 bytes each), written
+    /// through a cache-less handle, then reopened with a cache of `budget`.
+    fn cached_handle(budget: usize) -> (Arc<CountingStore>, Array) {
+        let s = Arc::new(CountingStore {
+            inner: MemoryStore::new(),
+            gets: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let meta =
+            ArrayMetadata::new(ZarrFormat::V2, vec![4, 4], vec![2, 2], DType::FLOAT64).unwrap();
+        let writer = Array::create(s.clone(), "c", meta).unwrap();
+        writer
+            .write_f64(&[Selection::ALL, Selection::ALL], &values(16))
+            .unwrap();
+        let reader = Array::open(s.clone(), "c")
+            .unwrap()
+            .with_chunk_cache(budget);
+        // Opening reads metadata keys; only chunk reads are counted below.
+        s.gets.store(0, std::sync::atomic::Ordering::SeqCst);
+        (s, reader)
+    }
+
+    #[test]
+    fn cache_hits_avoid_store_reads() {
+        let (s, a) = cached_handle(1024);
+        let all = [Selection::ALL, Selection::ALL];
+        assert_eq!(a.read_f64(&all).unwrap(), values(16));
+        assert_eq!(s.gets(), 4);
+        assert_eq!(a.read_f64(&all).unwrap(), values(16));
+        assert_eq!(s.gets(), 4, "second read is served from the cache");
+        assert_eq!(a.chunk_cache_bytes().unwrap(), Some(4 * 32));
+    }
+
+    #[test]
+    fn cache_budget_is_respected_and_eviction_keeps_data_correct() {
+        // Room for two of the four 32-byte chunks.
+        let (s, a) = cached_handle(64);
+        let all = [Selection::ALL, Selection::ALL];
+        assert_eq!(a.read_f64(&all).unwrap(), values(16));
+        assert_eq!(s.gets(), 4);
+        assert!(a.chunk_cache_bytes().unwrap().unwrap() <= 64);
+
+        // After the full read the cache holds chunks 2 and 3 (LRU order: 2, 3).
+        let chunk = |c: &[u64]| a.read_chunk(c).unwrap().unwrap();
+        assert_eq!(chunk(&[1, 0]).len(), 32);
+        assert_eq!(s.gets(), 4, "chunk [1,0] is a hit");
+        // Chunk [0,0] was evicted; reading it reaches the store and evicts the
+        // least recently used entry, which is now [1,1].
+        assert_eq!(
+            a.read_f64(&[
+                Selection::Range(Slice::range(0, 1)),
+                Selection::Range(Slice::range(0, 2))
+            ])
+            .unwrap(),
+            vec![0.0, 1.0]
+        );
+        assert_eq!(s.gets(), 5);
+        assert!(a.chunk_cache_bytes().unwrap().unwrap() <= 64);
+        // Results stay correct across repeated evicting reads.
+        for _ in 0..3 {
+            assert_eq!(a.read_f64(&all).unwrap(), values(16));
+        }
+    }
+
+    #[test]
+    fn oversized_chunks_bypass_the_cache() {
+        let (s, a) = cached_handle(16);
+        let all = [Selection::ALL, Selection::ALL];
+        assert_eq!(a.read_f64(&all).unwrap(), values(16));
+        assert_eq!(a.read_f64(&all).unwrap(), values(16));
+        assert_eq!(s.gets(), 8);
+        assert_eq!(a.chunk_cache_bytes().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn writes_through_the_handle_update_the_cache() {
+        let (s, a) = cached_handle(1024);
+        let all = [Selection::ALL, Selection::ALL];
+        a.read_f64(&all).unwrap();
+        let before = s.gets();
+        a.write_f64(
+            &[Selection::Index(0), Selection::ALL],
+            &[-1.0, -2.0, -3.0, -4.0],
+        )
+        .unwrap();
+        assert_eq!(
+            a.read_f64(&[Selection::Index(0), Selection::ALL]).unwrap(),
+            vec![-1.0, -2.0, -3.0, -4.0]
+        );
+        assert_eq!(s.gets(), before, "written chunks are served from the cache");
     }
 
     #[test]

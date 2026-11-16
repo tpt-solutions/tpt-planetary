@@ -19,6 +19,9 @@ std = []
 # Vectorised elementwise and reduction kernels via tpt-simd-vector (MIT OR Apache-2.0,
 # rust-version 1.95). Off by default; the scalar code is the reference.
 simd = ["dep:tpt-simd-vector"]
+# Parallel evaluation of lazy-expression blocks with `std::thread::scope` (see
+# `EvalOptions::workers`). Off by default: the serial path is the reference.
+threads = ["std"]
 
 [dependencies]
 # Pure-Rust DEFLATE/zlib (MIT OR Zlib OR Apache-2.0), rust-version not declared upstream; builds on the workspace MSRV.

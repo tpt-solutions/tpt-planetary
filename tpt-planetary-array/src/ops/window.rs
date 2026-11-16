@@ -11,7 +11,7 @@ use crate::grid::c_strides;
 use crate::lazy::{Block, Expr, NodeOp, Region};
 use crate::ops::nd::{element_count, empty_block, for_each_index, is_empty_region};
 
-fn check_axis(shape: &[u64], axis: usize) -> Result<()> {
+pub(crate) fn check_axis(shape: &[u64], axis: usize) -> Result<()> {
     if axis >= shape.len() {
         return Err(Error::InvalidSelection(alloc::format!(
             "axis {axis} out of range for {} dimensions",
@@ -267,7 +267,10 @@ mod tests {
             }
         }
         let (stats, exec) = r
-            .stats_with(crate::lazy::EvalOptions { block_elements: 7 })
+            .stats_with(crate::lazy::EvalOptions {
+                block_elements: 7,
+                workers: 1,
+            })
             .unwrap();
         assert!(exec.blocks > 1);
         assert_eq!(stats.count, 5 * 7);
@@ -304,10 +307,14 @@ mod tests {
         let (a, _) = r
             .stats_with(crate::lazy::EvalOptions {
                 block_elements: 1000,
+                workers: 1,
             })
             .unwrap();
         let (b, exec) = r
-            .stats_with(crate::lazy::EvalOptions { block_elements: 5 })
+            .stats_with(crate::lazy::EvalOptions {
+                block_elements: 5,
+                workers: 1,
+            })
             .unwrap();
         assert!(exec.max_block_elements <= 5);
         assert!((a.mean - b.mean).abs() < 1e-12);

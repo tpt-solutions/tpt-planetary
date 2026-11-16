@@ -12,8 +12,12 @@
 //!   ([`codec`]);
 //! - a synchronous [`Store`] trait with in-memory and local-filesystem
 //!   implementations (`std` feature);
-//! - an [`Array`] handle with chunked read and write paths; and
-//! - a lazy expression graph with bounded-memory reductions ([`lazy`]).
+//! - an [`Array`] handle with chunked read and write paths, with an optional
+//!   byte-budgeted LRU chunk cache ([`cache`], `std` feature);
+//! - a retry-with-backoff wrapper for transiently failing stores ([`retry`]);
+//!   and
+//! - a lazy expression graph with bounded-memory reductions ([`lazy`]),
+//!   optionally evaluating blocks in parallel (`threads` feature).
 //!
 //! The crate is `no_std` with `alloc` when the default `std` feature is
 //! disabled. Asynchronous and network-backed stores are not implemented.
@@ -47,6 +51,7 @@
 extern crate alloc;
 
 pub mod array;
+pub mod cache;
 pub mod codec;
 pub mod dtype;
 pub mod error;
@@ -58,6 +63,7 @@ pub mod meta;
 pub mod netcdf3;
 pub mod ops;
 pub mod plan;
+pub mod retry;
 pub mod selection;
 pub mod store;
 

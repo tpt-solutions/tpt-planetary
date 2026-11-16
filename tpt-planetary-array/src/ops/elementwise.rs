@@ -461,11 +461,15 @@ mod tests {
         let big = e
             .stats_with(crate::lazy::EvalOptions {
                 block_elements: 1000,
+                workers: 1,
             })
             .unwrap()
             .0;
         let (small, exec) = e
-            .stats_with(crate::lazy::EvalOptions { block_elements: 3 })
+            .stats_with(crate::lazy::EvalOptions {
+                block_elements: 3,
+                workers: 1,
+            })
             .unwrap();
         assert!(exec.max_block_elements <= 3);
         assert!(exec.blocks > 1);

@@ -5,6 +5,11 @@
 //! output in blocks of at most [`EvalOptions::block_elements`] elements, so
 //! memory use is bounded by the block size rather than by the array size.
 //!
+//! The executor is serial by default. With the `threads` feature and
+//! [`EvalOptions::workers`] greater than one, blocks are evaluated on scoped
+//! threads; results are combined in block order and do not depend on the
+//! worker count.
+//!
 //! Values are evaluated as `f64`. Elements equal to the array's fill value
 //! and NaN elements are masked out of every reduction (NaN-aware semantics).
 //! Mean, variance and standard deviation are computed with Welford's
@@ -23,17 +28,47 @@ use crate::selection::{ResolvedDim, Selection, Slice, output_shape, resolve_all}
 pub const DEFAULT_BLOCK_ELEMENTS: usize = 1 << 18;
 
 /// Options controlling chunk-streaming evaluation.
+///
+/// The default is the serial path. Parallel block evaluation needs the
+/// `threads` feature; without it, `workers` is ignored and evaluation stays
+/// serial. Results do not depend on `workers`: blocks are evaluated in
+/// batches of `workers` regions, and their results are combined in block
+/// order, so floating-point results are bit-for-bit identical to the serial
+/// path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvalOptions {
     /// Maximum number of elements in one evaluated block (at least 1).
     pub block_elements: usize,
+    /// Number of blocks evaluated concurrently (at least 1). Used only with
+    /// the `threads` feature; the default of 1 is the serial path.
+    pub workers: usize,
 }
 
 impl Default for EvalOptions {
     fn default() -> Self {
         Self {
             block_elements: DEFAULT_BLOCK_ELEMENTS,
+            workers: 1,
         }
+    }
+}
+
+impl EvalOptions {
+    /// Returns these options with `workers` concurrent blocks (see
+    /// [`EvalOptions::workers`]).
+    pub fn with_workers(mut self, workers: usize) -> Self {
+        self.workers = workers;
+        self
+    }
+}
+
+/// Number of blocks evaluated per batch: `options.workers` with the
+/// `threads` feature, otherwise one.
+fn batch_width(options: EvalOptions) -> usize {
+    if cfg!(feature = "threads") {
+        options.workers.max(1)
+    } else {
+        1
     }
 }
 
@@ -294,20 +329,112 @@ impl Expr {
         }
         let shape = self.shape();
         let mut total = Stats::default();
-        let mut exec = ExecStats::default();
-        for region in BlockIter::new(&shape, options.block_elements) {
-            let block = self.eval_region(&region)?;
-            exec.blocks += 1;
-            exec.max_block_elements = exec.max_block_elements.max(block.values.len());
-            let mut local = Stats::default();
-            for (&v, &ok) in block.values.iter().zip(&block.valid) {
-                if ok && !v.is_nan() {
-                    local.push(v);
+        let exec = self.stream_blocks(
+            &shape,
+            options,
+            |_, block| {
+                let mut local = Stats::default();
+                for (&v, &ok) in block.values.iter().zip(&block.valid) {
+                    if ok && !v.is_nan() {
+                        local.push(v);
+                    }
                 }
-            }
-            total.merge(&local);
-        }
+                Ok(local)
+            },
+            |_, local| total.merge(&local),
+        )?;
         Ok((total, exec))
+    }
+
+    /// Evaluates the expression block by block over `shape` (its full
+    /// output shape), applies `map` to each block, and passes the results to
+    /// `consume` in block order.
+    ///
+    /// `map` runs on the evaluating thread (serially, or on a worker with the
+    /// `threads` feature). `consume` always runs on the calling thread in the
+    /// same order as the serial path, so any reduction it performs gives the
+    /// same result for every worker count. At most `workers` blocks are held
+    /// at once.
+    pub(crate) fn stream_blocks<T, M, C>(
+        &self,
+        shape: &[u64],
+        options: EvalOptions,
+        map: M,
+        mut consume: C,
+    ) -> Result<ExecStats>
+    where
+        T: Send,
+        M: Fn(&Region, Block) -> Result<T> + Sync,
+        C: FnMut(&Region, T),
+    {
+        if options.block_elements == 0 {
+            return Err(Error::InvalidSelection(
+                "block_elements must be positive".into(),
+            ));
+        }
+        let width = batch_width(options);
+        let mut regions = BlockIter::new(shape, options.block_elements);
+        let mut exec = ExecStats::default();
+        loop {
+            let batch: Vec<Region> = regions.by_ref().take(width).collect();
+            if batch.is_empty() {
+                return Ok(exec);
+            }
+            let results = self.eval_batch(&batch, &map);
+            for (region, result) in batch.iter().zip(results) {
+                let (len, out) = result?;
+                exec.blocks += 1;
+                exec.max_block_elements = exec.max_block_elements.max(len);
+                consume(region, out);
+            }
+        }
+    }
+
+    /// Evaluates one region and maps it. Returns the block's element count
+    /// alongside the mapped value.
+    fn eval_one<T, M>(&self, region: &Region, map: &M) -> Result<(usize, T)>
+    where
+        M: Fn(&Region, Block) -> Result<T>,
+    {
+        let block = self.eval_region(region)?;
+        let len = block.values.len();
+        map(region, block).map(|out| (len, out))
+    }
+
+    /// Evaluates a batch of regions in order, concurrently when the
+    /// `threads` feature is enabled and the batch has more than one region.
+    #[cfg(not(feature = "threads"))]
+    fn eval_batch<T, M>(&self, batch: &[Region], map: &M) -> Vec<Result<(usize, T)>>
+    where
+        M: Fn(&Region, Block) -> Result<T>,
+    {
+        batch.iter().map(|r| self.eval_one(r, map)).collect()
+    }
+
+    /// Evaluates a batch of regions in order, one scoped thread per region
+    /// when the batch has more than one region.
+    #[cfg(feature = "threads")]
+    fn eval_batch<T, M>(&self, batch: &[Region], map: &M) -> Vec<Result<(usize, T)>>
+    where
+        T: Send,
+        M: Fn(&Region, Block) -> Result<T> + Sync,
+    {
+        if batch.len() < 2 {
+            return batch.iter().map(|r| self.eval_one(r, map)).collect();
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|r| scope.spawn(move || self.eval_one(r, map)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| match h.join() {
+                    Ok(result) => result,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                })
+                .collect()
+        })
     }
 
     /// Sum of valid elements (zero if there are none).
@@ -473,6 +600,7 @@ mod tests {
     use crate::dtype::DType;
     use crate::fill::FillValue;
     use crate::meta::{ArrayMetadata, ZarrFormat};
+    use crate::ops::reduce::Reduction;
     use crate::store::MemoryStore;
 
     fn make_array(shape: Vec<u64>, chunks: Vec<u64>, data: &[f64], fill: FillValue) -> Array {
@@ -575,9 +703,15 @@ mod tests {
         let (big, _) = e
             .stats_with(EvalOptions {
                 block_elements: 1 << 20,
+                workers: 1,
             })
             .unwrap();
-        let (small, exec) = e.stats_with(EvalOptions { block_elements: 64 }).unwrap();
+        let (small, exec) = e
+            .stats_with(EvalOptions {
+                block_elements: 64,
+                workers: 1,
+            })
+            .unwrap();
         assert!(exec.max_block_elements <= 64);
         assert!(exec.blocks > 1);
         assert_eq!(big.count, small.count);
@@ -597,6 +731,105 @@ mod tests {
         assert_eq!(e.count().unwrap(), 0);
         assert_eq!(e.mean().unwrap(), None);
         assert_eq!(e.min().unwrap(), None);
+    }
+
+    /// Deterministic pseudo-random values in [-5, 5), with NaN and fill-like
+    /// holes, from a linear congruential generator.
+    fn lcg_values(n: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed;
+        (0..n)
+            .map(|i| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                match i % 11 {
+                    3 => f64::NAN,
+                    7 => -9999.0,
+                    _ => ((state >> 11) as f64 / (1u64 << 53) as f64) * 10.0 - 5.0,
+                }
+            })
+            .collect()
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|v| v.to_bits()).collect()
+    }
+
+    #[cfg(feature = "threads")]
+    #[test]
+    fn parallel_evaluation_is_bit_identical_to_serial() {
+        let (rows, cols) = (23u64, 17u64);
+        let data = lcg_values((rows * cols) as usize, 0x5eed);
+        let a = make_array(
+            vec![rows, cols],
+            vec![5, 4],
+            &data,
+            FillValue::Float(-9999.0),
+        );
+        let e = Expr::from_array(a);
+        let serial = EvalOptions {
+            block_elements: 19,
+            workers: 1,
+        };
+        let (s_stats, s_exec) = e.stats_with(serial).unwrap();
+        for workers in [2usize, 3, 8] {
+            let parallel = serial.with_workers(workers);
+            let (p_stats, p_exec) = e.stats_with(parallel).unwrap();
+            assert_eq!(p_exec.blocks, s_exec.blocks);
+            assert_eq!(p_stats.count, s_stats.count);
+            assert_eq!(p_stats.sum.to_bits(), s_stats.sum.to_bits());
+            assert_eq!(p_stats.mean.to_bits(), s_stats.mean.to_bits());
+            assert_eq!(p_stats.m2.to_bits(), s_stats.m2.to_bits());
+            assert_eq!(p_stats.min.to_bits(), s_stats.min.to_bits());
+            assert_eq!(p_stats.max.to_bits(), s_stats.max.to_bits());
+
+            let axis_sets: [&[usize]; 4] = [&[0], &[1], &[0, 1], &[]];
+            for axes in axis_sets {
+                for op in [
+                    Reduction::Sum,
+                    Reduction::Mean,
+                    Reduction::Min,
+                    Reduction::Max,
+                ] {
+                    for skip in [true, false] {
+                        let s = e.reduce_axes_with(axes, op, skip, serial).unwrap();
+                        let p = e.reduce_axes_with(axes, op, skip, parallel).unwrap();
+                        assert_eq!(s.shape, p.shape);
+                        assert_eq!(bits(&s.values), bits(&p.values), "{axes:?} {op:?} {skip}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workers_do_not_change_serial_results() {
+        // Holds with or without the `threads` feature.
+        let data = lcg_values(100, 99);
+        let e = Expr::from_values(vec![10, 10], data.clone()).unwrap();
+        let one = e
+            .reduce_axes_with(
+                &[1],
+                Reduction::Sum,
+                true,
+                EvalOptions {
+                    block_elements: 7,
+                    workers: 1,
+                },
+            )
+            .unwrap();
+        let four = e
+            .reduce_axes_with(
+                &[1],
+                Reduction::Sum,
+                true,
+                EvalOptions {
+                    block_elements: 7,
+                    workers: 4,
+                },
+            )
+            .unwrap();
+        assert_eq!(bits(&one.values), bits(&four.values));
     }
 
     #[test]

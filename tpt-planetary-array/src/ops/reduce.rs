@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::grid::c_strides;
-use crate::lazy::{BlockIter, EvalOptions, Expr};
+use crate::lazy::{EvalOptions, Expr};
 use crate::ops::nd::{element_count, for_each_index};
 
 /// A reduction applied along one or more axes.
@@ -150,41 +150,46 @@ impl Expr {
         }
 
         let mut acc = vec![Acc::EMPTY; element_count(&out_shape)];
-        for region in BlockIter::new(&shape, options.block_elements) {
-            let block = self.eval_region(&region)?;
-            #[cfg(feature = "simd")]
-            if acc.len() == 1 {
-                // Every element feeds the single output cell, so the block can
-                // be reduced as one slice.
-                if skip_invalid {
-                    let kept: Vec<f64> = block
-                        .values
-                        .iter()
-                        .zip(&block.valid)
-                        .filter(|(_, ok)| **ok)
-                        .map(|(&v, _)| v)
-                        .collect();
-                    acc[0].push_slice(&kept);
-                } else {
-                    acc[0].push_slice(&block.values);
-                }
-                continue;
-            }
-            let mut i = 0usize;
-            for_each_index(&region.count, |idx| {
-                let ok = block.valid[i];
-                let v = block.values[i];
-                i += 1;
-                if skip_invalid && !ok {
+        // Blocks are folded in block order, whatever the worker count.
+        self.stream_blocks(
+            &shape,
+            options,
+            |_, block| Ok(block),
+            |region, block| {
+                #[cfg(feature = "simd")]
+                if acc.len() == 1 {
+                    // Every element feeds the single output cell, so the block can
+                    // be reduced as one slice.
+                    if skip_invalid {
+                        let kept: Vec<f64> = block
+                            .values
+                            .iter()
+                            .zip(&block.valid)
+                            .filter(|(_, ok)| **ok)
+                            .map(|(&v, _)| v)
+                            .collect();
+                        acc[0].push_slice(&kept);
+                    } else {
+                        acc[0].push_slice(&block.values);
+                    }
                     return;
                 }
-                let mut off = 0u64;
-                for (d, &j) in idx.iter().enumerate() {
-                    off += (region.start[d] + j) * in_strides[d];
-                }
-                acc[off as usize].push(v);
-            });
-        }
+                let mut i = 0usize;
+                for_each_index(&region.count, |idx| {
+                    let ok = block.valid[i];
+                    let v = block.values[i];
+                    i += 1;
+                    if skip_invalid && !ok {
+                        return;
+                    }
+                    let mut off = 0u64;
+                    for (d, &j) in idx.iter().enumerate() {
+                        off += (region.start[d] + j) * in_strides[d];
+                    }
+                    acc[off as usize].push(v);
+                });
+            },
+        )?;
         Ok(Reduced {
             shape: out_shape,
             values: acc.iter().map(|a| a.finish(op)).collect(),
@@ -324,6 +329,7 @@ mod tests {
                 true,
                 EvalOptions {
                     block_elements: 1000,
+                    workers: 1,
                 },
             )
             .unwrap();
@@ -332,7 +338,10 @@ mod tests {
                 &[0],
                 Reduction::Mean,
                 true,
-                EvalOptions { block_elements: 5 },
+                EvalOptions {
+                    block_elements: 5,
+                    workers: 1,
+                },
             )
             .unwrap();
         for (a, b) in big.values.iter().zip(&small.values) {

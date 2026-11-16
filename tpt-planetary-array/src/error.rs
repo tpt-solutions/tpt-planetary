@@ -27,6 +27,12 @@ pub enum Error {
     NotFound(String),
     /// An I/O error from a store backend (only produced with the `std` feature).
     Io(String),
+    /// A store operation failed in a way that may succeed if it is retried,
+    /// such as a timeout or a throttled request. [`RetryStore`](crate::retry::RetryStore)
+    /// retries errors for which [`Error::is_transient`] is true. The
+    /// synchronous local stores ([`MemoryStore`](crate::store::MemoryStore),
+    /// [`FsStore`](crate::store::FsStore)) never produce this variant.
+    Transient(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -47,7 +53,16 @@ impl fmt::Display for Error {
             Error::Codec(m) => write!(f, "codec error: {m}"),
             Error::NotFound(m) => write!(f, "not found: {m}"),
             Error::Io(m) => write!(f, "I/O error: {m}"),
+            Error::Transient(m) => write!(f, "transient store error: {m}"),
         }
+    }
+}
+
+impl Error {
+    /// True if the error is [`Error::Transient`], meaning the failed operation
+    /// may succeed when retried.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Error::Transient(_))
     }
 }
 
