@@ -8,8 +8,11 @@ use alloc::vec::Vec;
 
 use serde_json::{Map, Value};
 
-use crate::codec::Pipeline;
-use crate::codec::Registry;
+use alloc::boxed::Box;
+
+use crate::codec::sharding::ShardingCodec;
+use crate::codec::transpose::TransposeCodec;
+use crate::codec::{Codec, Pipeline, Registry};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::fill::FillValue;
@@ -131,14 +134,83 @@ impl ArrayMetadata {
     }
 
     /// Builds the codec pipeline using `registry`.
+    ///
+    /// Codecs are checked against the Zarr v3 stage order: array-to-array
+    /// (`transpose`) first, then at most one array-to-bytes codec
+    /// (`sharding_indexed`), then bytes-to-bytes codecs. `transpose` and
+    /// `sharding_indexed` are built here, not by the registry, because they
+    /// need the chunk shape and fill value. Each returned codec maps the stored
+    /// chunk back to its element bytes in C order.
     pub fn pipeline(&self, registry: &Registry) -> Result<Pipeline> {
-        let codecs = self
-            .codecs
-            .iter()
-            .map(|spec| registry.build(&spec.name, &spec.config, &self.dtype))
-            .collect::<Result<Vec<_>>>()?;
+        let mut stage = Stage::ArrayToArray;
+        let mut shape = self.chunk_shape.clone();
+        let item = self.dtype.item_size();
+        let mut codecs: Vec<Box<dyn Codec>> = Vec::with_capacity(self.codecs.len());
+        for spec in &self.codecs {
+            match spec.name.as_str() {
+                "transpose" => {
+                    if stage != Stage::ArrayToArray {
+                        return Err(Error::InvalidMetadata(
+                            "transpose must come before sharding and bytes-to-bytes codecs".into(),
+                        ));
+                    }
+                    let t = TransposeCodec::new(&spec.config, &shape, item)?;
+                    shape = t.output_shape();
+                    codecs.push(Box::new(t));
+                }
+                "sharding_indexed" => {
+                    if stage != Stage::ArrayToArray {
+                        return Err(Error::InvalidMetadata(
+                            "sharding_indexed must follow only array-to-array codecs".into(),
+                        ));
+                    }
+                    let fill = self.fill_value.to_element_bytes(&self.dtype)?;
+                    let s = ShardingCodec::new(&spec.config, &shape, &self.dtype, &fill, registry)?;
+                    stage = Stage::ArrayToBytes;
+                    codecs.push(Box::new(s));
+                }
+                "bitshuffle" => {
+                    if stage == Stage::ArrayToBytes {
+                        return Err(Error::InvalidMetadata(
+                            "bitshuffle after sharding_indexed is not supported".into(),
+                        ));
+                    }
+                    let elements = shape
+                        .iter()
+                        .try_fold(1usize, |acc, &d| acc.checked_mul(usize::try_from(d).ok()?))
+                        .ok_or_else(|| Error::InvalidMetadata("chunk shape is too large".into()))?;
+                    let nbytes = elements
+                        .checked_mul(item)
+                        .ok_or_else(|| Error::InvalidMetadata("chunk size is too large".into()))?;
+                    let c = crate::codec::bitshuffle::bitshuffle_for_size(
+                        &spec.config,
+                        &self.dtype,
+                        Some(nbytes),
+                    )?;
+                    stage = Stage::BytesToBytes;
+                    codecs.push(Box::new(c));
+                }
+                name => {
+                    if stage == Stage::ArrayToArray {
+                        stage = Stage::BytesToBytes;
+                    }
+                    codecs.push(registry.build(name, &spec.config, &self.dtype)?);
+                }
+            }
+        }
         Ok(Pipeline::new(codecs))
     }
+}
+
+/// Position of a codec in the Zarr v3 chain, used to check stage order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Only array-to-array codecs so far.
+    ArrayToArray,
+    /// An array-to-bytes codec has been placed.
+    ArrayToBytes,
+    /// A bytes-to-bytes codec has been placed; no array codecs may follow.
+    BytesToBytes,
 }
 
 /// Metadata of a Zarr group.

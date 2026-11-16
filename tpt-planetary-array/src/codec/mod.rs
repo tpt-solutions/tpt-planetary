@@ -15,8 +15,13 @@ use serde_json::Value;
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 
+pub mod bitshuffle;
+pub mod blosc;
 pub mod compress;
+pub mod crc32c;
 pub mod filters;
+pub mod sharding;
+pub mod transpose;
 
 /// A reversible transformation of a chunk's bytes.
 pub trait Codec: Send + Sync + fmt::Debug {
@@ -115,6 +120,13 @@ impl Registry {
         r.register("zstd", compress::zstd_factory);
         r.register("shuffle", filters::shuffle_factory);
         r.register("delta", filters::delta_factory);
+        r.register("bitshuffle", bitshuffle::bitshuffle_factory);
+        r.register("blosc", blosc::blosc_factory);
+        r.register("crc32c", crc32c::crc32c_factory);
+        // Array-level codecs: they need the chunk shape, so they are built by
+        // `ArrayMetadata::pipeline`; these entries report that clearly.
+        r.register("transpose", transpose::transpose_factory);
+        r.register("sharding_indexed", sharding::sharding_factory);
         r
     }
 
@@ -189,5 +201,32 @@ mod tests {
         assert!(r.build("bogus", &json!({}), &DType::FLOAT64).is_err());
         assert!(r.contains("zstd"));
         assert!(r.contains("shuffle"));
+        assert!(r.contains("bitshuffle"));
+        assert!(r.contains("blosc"));
+        assert!(r.contains("crc32c"));
+        assert!(r.contains("transpose"));
+        assert!(r.contains("sharding_indexed"));
+        // Array-level codecs cannot be built without the chunk shape.
+        assert!(matches!(
+            r.build("transpose", &json!({"order": [0]}), &DType::FLOAT64),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(
+            r.build("blosc", &json!({"cname": "lz4"}), &DType::FLOAT64)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn pipeline_names_follow_encoding_order() {
+        let r = Registry::builtin();
+        let p = Pipeline::new(vec![
+            r.build("bitshuffle", &json!({}), &DType::FLOAT64).unwrap(),
+            r.build("crc32c", &json!({}), &DType::FLOAT64).unwrap(),
+        ]);
+        assert_eq!(
+            p.names(),
+            vec!["bitshuffle".to_string(), "crc32c".to_string()]
+        );
     }
 }

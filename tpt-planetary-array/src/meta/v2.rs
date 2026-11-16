@@ -26,7 +26,16 @@ pub const ZATTRS: &str = ".zattrs";
 pub const ZMETADATA: &str = ".zmetadata";
 
 /// Codec identifiers that act as the (last) compressor rather than a filter.
-const COMPRESSOR_IDS: &[&str] = &["gzip", "zlib", "lz4", "zstd", "blosc", "bz2", "lzma"];
+const COMPRESSOR_IDS: &[&str] = &[
+    "gzip",
+    "zlib",
+    "lz4",
+    "zstd",
+    "blosc",
+    "bitshuffle",
+    "bz2",
+    "lzma",
+];
 
 /// Parses a `.zarray` document and optional `.zattrs` document.
 pub fn parse_array(zarray: &[u8], zattrs: Option<&[u8]>) -> Result<ArrayMetadata> {

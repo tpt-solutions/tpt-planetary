@@ -226,6 +226,7 @@ pub fn group_json(group: &GroupMetadata) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::Registry;
 
     /// Hand-written `zarr.json` for a float32 array with a big-endian bytes
     /// codec, a gzip codec and the `/`-separated default chunk key encoding.
@@ -293,5 +294,89 @@ mod tests {
     fn rejects_unsupported_grid() {
         let doc = ARRAY_FIXTURE.replace("\"regular\"", "\"rectilinear\"");
         assert!(parse_node(doc.as_bytes()).is_err());
+    }
+
+    /// Hand-written `zarr.json` for a 4x4 uint8 array: a `transpose` codec
+    /// (array-to-array) followed by a `sharding_indexed` codec with 2x2 inner
+    /// chunks, each gzip-compressed, and an index with a CRC-32C checksum.
+    const SHARDED_FIXTURE: &str = r#"{
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4, 4],
+        "data_type": "uint8",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4, 4]}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0,
+        "codecs": [
+            {"name": "transpose", "configuration": {"order": [1, 0]}},
+            {"name": "sharding_indexed", "configuration": {
+                "chunk_shape": [2, 2],
+                "codecs": [
+                    {"name": "bytes", "configuration": {"endian": "little"}},
+                    {"name": "gzip", "configuration": {"level": 1}}
+                ],
+                "index_codecs": [
+                    {"name": "bytes", "configuration": {"endian": "little"}},
+                    {"name": "crc32c"}
+                ],
+                "index_location": "end"
+            }}
+        ]
+    }"#;
+
+    #[test]
+    fn parses_sharded_transposed_array_and_round_trips() {
+        let NodeMetadata::Array(m) = parse_node(SHARDED_FIXTURE.as_bytes()).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(m.codecs.len(), 2);
+        assert_eq!(m.codecs[0].name, "transpose");
+        assert_eq!(m.codecs[1].name, "sharding_indexed");
+
+        let registry = Registry::builtin();
+        let pipeline = m.pipeline(&registry).unwrap();
+        assert_eq!(
+            pipeline.names(),
+            vec!["transpose".to_string(), "sharding_indexed".to_string()]
+        );
+        let data: Vec<u8> = (0..16u8).collect();
+        let stored = pipeline.encode(&data).unwrap();
+        assert_eq!(pipeline.decode(&stored).unwrap(), data);
+        // Every stored chunk is missing when the data is all fill, so the
+        // shard of an all-zero chunk is only an index.
+        let zeros = pipeline.encode(&[0u8; 16]).unwrap();
+        assert_eq!(zeros.len(), 16 * 4 + 4);
+        assert_eq!(pipeline.decode(&zeros).unwrap(), vec![0u8; 16]);
+
+        // The metadata document survives a write and re-parse.
+        let text = array_json(&m).unwrap();
+        let NodeMetadata::Array(again) = parse_node(text.as_bytes()).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(again, m);
+    }
+
+    #[test]
+    fn rejects_out_of_order_codecs() {
+        // Sharding first, then transpose: the transpose would act on bytes.
+        let doc = r#"{
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [4, 4],
+            "data_type": "uint8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4, 4]}},
+            "fill_value": 0,
+            "codecs": [
+                {"name": "sharding_indexed", "configuration": {
+                    "chunk_shape": [2, 2],
+                    "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}]
+                }},
+                {"name": "transpose", "configuration": {"order": [1, 0]}}
+            ]
+        }"#;
+        let NodeMetadata::Array(m) = parse_node(doc.as_bytes()).unwrap() else {
+            panic!("expected array");
+        };
+        assert!(m.pipeline(&Registry::builtin()).is_err());
     }
 }
