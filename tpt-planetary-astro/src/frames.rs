@@ -11,6 +11,11 @@
 //! - ICRS -> true ecliptic with a caller-supplied obliquity (see
 //!   [`TrueEcliptic`] for the limits)
 //! - ICRS -> local horizontal (Alt/Az) for an observer and local sidereal time
+//! - ICRS, CIRS, TIRS and ITRS, in all ordered pairs, with the epoch and polar
+//!   motion supplied in a [`TransformContext`] ([`FrameTransformAt`]; the CIO
+//!   chain of [`crate::cio`])
+//! - ICRS -> geodetic Alt/Az on WGS84 at a given epoch ([`icrs_to_altaz_at`]);
+//!   no refraction, aberration, light deflection or parallax
 //!
 //! Angles are stored in radians. Constructors and accessors in degrees are
 //! provided for convenience.
@@ -20,6 +25,10 @@ use core::marker::PhantomData;
 
 use tpt_planetary_core::angle::Radians;
 use tpt_planetary_core::ellipsoid::{Geodetic, WGS84};
+
+use crate::cio;
+use crate::eop::ARCSEC_TO_RAD;
+use crate::time;
 
 /// Radians per degree.
 const DEG: f64 = PI / 180.0;
@@ -427,6 +436,261 @@ pub fn local_sidereal_time(sidereal_time_rad: f64, observer: Observer) -> f64 {
     (sidereal_time_rad + observer.lon_rad).rem_euclid(TAU)
 }
 
+/// Celestial intermediate reference system (CIRS): right ascension measured
+/// from the CIO along the equator of the CIP (IERS Conventions 2010, Section
+/// 5.4.2). Used for directions only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Cirs;
+
+/// Terrestrial intermediate reference system (TIRS): the Earth-fixed frame
+/// before polar motion, with the TIO on its x-axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tirs;
+
+/// International Terrestrial Reference System (ITRS), reached from TIRS by
+/// polar motion. Used for directions only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Itrs;
+
+impl Frame for Cirs {
+    const NAME: &'static str = "CIRS";
+}
+impl Frame for Tirs {
+    const NAME: &'static str = "TIRS";
+}
+impl Frame for Itrs {
+    const NAME: &'static str = "ITRS";
+}
+
+/// Epoch and Earth orientation inputs for the CIO-based transformations.
+///
+/// The TT and UT1 epochs are two-part Julian dates `(hi, lo)` as in
+/// [`crate::time`]. The polar coordinates are the CIP's `xp` and `yp` in
+/// radians. No EOP table is read: the caller supplies the values, and zero
+/// polar motion is a valid choice when it is not known. The TIO locator is
+/// the secular value of [`crate::cio::tio_locator`].
+///
+/// ```
+/// use tpt_planetary_astro::frames::TransformContext;
+/// let ctx = TransformContext::new((2_451_545.0, 0.0), (2_451_545.0, 0.0), 0.1, 0.2);
+/// assert!((ctx.xp * 206_264.806_247_096_36 - 0.1).abs() < 1e-12);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransformContext {
+    /// TT Julian date, high part.
+    pub tt_hi: f64,
+    /// TT Julian date, low part.
+    pub tt_lo: f64,
+    /// UT1 Julian date, high part.
+    pub ut1_hi: f64,
+    /// UT1 Julian date, low part.
+    pub ut1_lo: f64,
+    /// CIP polar coordinate `xp`, radians.
+    pub xp: f64,
+    /// CIP polar coordinate `yp`, radians.
+    pub yp: f64,
+}
+
+impl TransformContext {
+    /// Creates a context from the TT and UT1 two-part Julian dates and the
+    /// polar coordinates in arcseconds.
+    #[must_use]
+    pub fn new(tt: (f64, f64), ut1: (f64, f64), xp_arcsec: f64, yp_arcsec: f64) -> Self {
+        Self {
+            tt_hi: tt.0,
+            tt_lo: tt.1,
+            ut1_hi: ut1.0,
+            ut1_lo: ut1.1,
+            xp: xp_arcsec * ARCSEC_TO_RAD,
+            yp: yp_arcsec * ARCSEC_TO_RAD,
+        }
+    }
+}
+
+/// Transformation from frame `Self` to frame `To` that depends on the epoch
+/// and Earth orientation, supplied as a [`TransformContext`].
+pub trait FrameTransformAt<To: Frame>: Frame {
+    /// Applies the transformation at the context's epoch.
+    fn transform_at(coord: SkyCoord<Self>, ctx: &TransformContext) -> SkyCoord<To>;
+}
+
+impl<F: Frame> SkyCoord<F> {
+    /// Transforms this coordinate into frame `T` at the epoch and polar motion
+    /// of `ctx`.
+    ///
+    /// ```
+    /// use tpt_planetary_astro::frames::{Cirs, Icrs, SkyCoord, TransformContext};
+    /// let ctx = TransformContext::new((2_451_545.0, 0.0), (2_451_545.0, 0.0), 0.0, 0.0);
+    /// let star = SkyCoord::<Icrs>::from_degrees(10.0, 20.0);
+    /// let back = star.transform_at::<Cirs>(&ctx).transform_at::<Icrs>(&ctx);
+    /// assert!((back.lon() - star.lon()).abs() < 1e-12);
+    /// ```
+    #[must_use]
+    pub fn transform_at<T: Frame>(self, ctx: &TransformContext) -> SkyCoord<T>
+    where
+        F: FrameTransformAt<T>,
+    {
+        F::transform_at(self, ctx)
+    }
+}
+
+/// Internal tag for the four CIO-chain frames, used to pick matrices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Icrs,
+    Cirs,
+    Tirs,
+    Itrs,
+}
+
+/// Matrix from ICRS to `to` at the context. For `Itrs` this is
+/// `W R Q`, which equals [`cio::icrs_to_itrs`] at the same epoch.
+fn matrix_from_icrs(to: Kind, ctx: &TransformContext) -> Mat3 {
+    if to == Kind::Icrs {
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    }
+    let q = cio::icrs_to_cirs(ctx.tt_hi, ctx.tt_lo);
+    if to == Kind::Cirs {
+        return q;
+    }
+    let era = time::earth_rotation_angle(ctx.ut1_hi, ctx.ut1_lo);
+    let r = cio::cirs_to_tirs(era);
+    if to == Kind::Tirs {
+        return mat_mul(&r, &q);
+    }
+    let sp = cio::tio_locator(ctx.tt_hi, ctx.tt_lo);
+    let w = cio::tirs_to_itrs(ctx.xp, ctx.yp, sp);
+    mat_mul(&w, &mat_mul(&r, &q))
+}
+
+/// Matrix from `from` to `to`. Each `matrix_from_icrs` is orthogonal, so the
+/// inverse of one is its transpose.
+fn matrix_between(from: Kind, to: Kind, ctx: &TransformContext) -> Mat3 {
+    mat_mul(
+        &matrix_from_icrs(to, ctx),
+        &transpose(&matrix_from_icrs(from, ctx)),
+    )
+}
+
+/// Rotates the unit vector `v` from `from` to `to` and returns the direction.
+fn rotate_direction<To: Frame>(
+    from: Kind,
+    to: Kind,
+    v: [f64; 3],
+    ctx: &TransformContext,
+) -> SkyCoord<To> {
+    let m = matrix_between(from, to, ctx);
+    SkyCoord::from_vector(mat_vec(&m, v)).unwrap_or_else(|| SkyCoord::from_radians(0.0, 0.0))
+}
+
+macro_rules! impl_frame_transform_at {
+    ($($from:ident => $to:ident),* $(,)?) => {
+        $(
+            impl FrameTransformAt<$to> for $from {
+                fn transform_at(coord: SkyCoord<Self>, ctx: &TransformContext) -> SkyCoord<$to> {
+                    rotate_direction::<$to>(
+                        Kind::$from,
+                        Kind::$to,
+                        coord.to_unit_vector(),
+                        ctx,
+                    )
+                }
+            }
+        )*
+    };
+}
+
+impl_frame_transform_at!(
+    Icrs => Cirs,
+    Icrs => Tirs,
+    Icrs => Itrs,
+    Cirs => Icrs,
+    Cirs => Tirs,
+    Cirs => Itrs,
+    Tirs => Icrs,
+    Tirs => Cirs,
+    Tirs => Itrs,
+    Itrs => Icrs,
+    Itrs => Cirs,
+    Itrs => Tirs,
+);
+
+/// Geodetic observer on the WGS84 ellipsoid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeodeticObserver {
+    /// Geodetic longitude in radians, east positive.
+    pub lon_rad: f64,
+    /// Geodetic latitude in radians, north positive.
+    pub lat_rad: f64,
+    /// Height above the WGS84 ellipsoid in metres.
+    pub height_m: f64,
+}
+
+impl GeodeticObserver {
+    /// Creates an observer from longitude and latitude in degrees and a height
+    /// in metres.
+    #[must_use]
+    pub fn from_degrees(lon_deg: f64, lat_deg: f64, height_m: f64) -> Self {
+        Self {
+            lon_rad: lon_deg * DEG,
+            lat_rad: lat_deg * DEG,
+            height_m,
+        }
+    }
+
+    /// Geocentric ITRS position of the observer in metres, from the WGS84
+    /// closed form in `tpt_planetary_core`.
+    #[must_use]
+    pub fn itrs_position(&self) -> [f64; 3] {
+        geodetic_to_itrs(self.lon_rad, self.lat_rad, self.height_m)
+    }
+}
+
+/// Altitude and azimuth of an ICRS direction (a direction at infinity) for a
+/// geodetic observer, at the epoch and polar motion of `ctx`.
+///
+/// The direction is rotated to ITRS with the CIO-based chain (IERS 2010 Eq.
+/// 5.1, [`cio::icrs_to_itrs`]). Its components along the observer's
+/// ellipsoid normal (up), east and north then give the altitude and the
+/// azimuth measured from north through east.
+///
+/// Not applied: atmospheric refraction, annual and diurnal aberration, light
+/// deflection, and parallax. The observer's height does not change the
+/// result for a direction at infinity, because only the local vertical
+/// direction enters. It is accepted so the observer can be described fully.
+/// The local vertical is the WGS84 ellipsoid normal, the direction of
+/// geodetic latitude.
+///
+/// ```
+/// use tpt_planetary_astro::frames::{GeodeticObserver, Icrs, SkyCoord, TransformContext, icrs_to_altaz_at};
+/// let ctx = TransformContext::new((2_451_545.0, 0.0), (2_451_545.0, 0.0), 0.0, 0.0);
+/// // At the North Pole the altitude of a star is its declination.
+/// let obs = GeodeticObserver::from_degrees(0.0, 90.0, 0.0);
+/// let star = SkyCoord::<Icrs>::from_degrees(0.0, 30.0);
+/// let altaz = icrs_to_altaz_at(star, obs, &ctx);
+/// assert!((altaz.lat_deg() - 30.0).abs() < 0.01);
+/// ```
+#[must_use]
+pub fn icrs_to_altaz_at(
+    coord: SkyCoord<Icrs>,
+    observer: GeodeticObserver,
+    ctx: &TransformContext,
+) -> SkyCoord<AltAz> {
+    let d = mat_vec(&matrix_from_icrs(Kind::Itrs, ctx), coord.to_unit_vector());
+    let (sl, cl) = observer.lon_rad.sin_cos();
+    let (sp, cp) = observer.lat_rad.sin_cos();
+    let east = [-sl, cl, 0.0];
+    let north = [-sp * cl, -sp * sl, cp];
+    let up = [cp * cl, cp * sl, sp];
+    let alt = dot3(up, d).clamp(-1.0, 1.0).asin();
+    let az = dot3(east, d).atan2(dot3(north, d));
+    SkyCoord::from_radians(az, alt)
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +910,126 @@ mod tests {
         let obs = Observer::from_degrees(0.0, 90.0);
         let lst = local_sidereal_time(0.5, obs);
         assert!((lst - (0.5 + PI / 2.0)).abs() < 1e-12);
+    }
+
+    fn test_context() -> TransformContext {
+        TransformContext::new((2_460_000.5, 0.25), (2_460_000.5, 0.2499), 0.1, 0.25)
+    }
+
+    fn vec_gap(a: [f64; 3], b: [f64; 3]) -> f64 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    }
+
+    fn angle_gap(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(TAU);
+        d.min(TAU - d)
+    }
+
+    #[test]
+    fn cirs_tirs_itrs_round_trip_is_identity() {
+        let c = test_context();
+        for (ra, dec) in [(0.0, 0.0), (123.4, -45.6), (300.0, 80.0), (250.0, -89.0)] {
+            let star = SkyCoord::<Icrs>::from_degrees(ra, dec);
+            let back = star
+                .transform_at::<Cirs>(&c)
+                .transform_at::<Tirs>(&c)
+                .transform_at::<Itrs>(&c)
+                .transform_at::<Tirs>(&c)
+                .transform_at::<Cirs>(&c)
+                .transform_at::<Icrs>(&c);
+            assert!(vec_gap(star.to_unit_vector(), back.to_unit_vector()) < 1e-13);
+            let direct = star.transform_at::<Itrs>(&c).transform_at::<Icrs>(&c);
+            assert!(vec_gap(star.to_unit_vector(), direct.to_unit_vector()) < 1e-13);
+        }
+    }
+
+    #[test]
+    fn chain_composition_equals_icrs_to_itrs() {
+        let c = test_context();
+        let m = cio::icrs_to_itrs(c.tt_hi, c.tt_lo, c.ut1_hi, c.ut1_lo, c.xp, c.yp);
+        for (ra, dec) in [(0.0, 0.0), (45.0, 10.0), (200.0, -70.0)] {
+            let star = SkyCoord::<Icrs>::from_degrees(ra, dec);
+            let v = star.to_unit_vector();
+            let via_chain = star
+                .transform_at::<Cirs>(&c)
+                .transform_at::<Tirs>(&c)
+                .transform_at::<Itrs>(&c)
+                .to_unit_vector();
+            assert!(vec_gap(mat_vec(&m, v), via_chain) < 1e-13);
+        }
+    }
+
+    #[test]
+    fn polar_motion_only_enters_the_tirs_to_itrs_step() {
+        let c = test_context();
+        let zero = TransformContext {
+            xp: 0.0,
+            yp: 0.0,
+            ..c
+        };
+        let star = SkyCoord::<Icrs>::from_degrees(77.0, 12.0);
+        let tirs = star.transform_at::<Tirs>(&c);
+        assert!(
+            vec_gap(
+                tirs.to_unit_vector(),
+                star.transform_at::<Tirs>(&zero).to_unit_vector()
+            ) < 1e-15
+        );
+        let moved = star.transform_at::<Itrs>(&c);
+        let unmoved = star.transform_at::<Itrs>(&zero);
+        assert!(vec_gap(moved.to_unit_vector(), unmoved.to_unit_vector()) > 1e-8);
+    }
+
+    #[test]
+    fn star_at_zenith_has_altitude_90() {
+        let c = test_context();
+        let obs = GeodeticObserver::from_degrees(-70.0, -30.0, 2000.0);
+        let (sl, cl) = obs.lon_rad.sin_cos();
+        let (sp, cp) = obs.lat_rad.sin_cos();
+        let up = [cp * cl, cp * sl, sp];
+        let m = matrix_from_icrs(Kind::Itrs, &c);
+        let icrs_dir = mat_vec(&transpose(&m), up);
+        let star = SkyCoord::<Icrs>::from_vector(icrs_dir).expect("nonzero");
+        let altaz = icrs_to_altaz_at(star, obs, &c);
+        assert!(
+            (altaz.lat() - PI / 2.0).abs() < 1e-12,
+            "alt={}",
+            altaz.lat()
+        );
+    }
+
+    #[test]
+    fn meridian_transit_altitude_and_azimuth() {
+        // At transit the star is on the observer's meridian: its altitude is
+        // 90 deg - |lat - dec|, and it lies due north when dec > lat, due
+        // south when dec < lat.
+        let c = test_context();
+        let obs = GeodeticObserver::from_degrees(-70.0, -30.0, 2000.0);
+        let m = matrix_from_icrs(Kind::Itrs, &c);
+        let (sl, cl) = obs.lon_rad.sin_cos();
+        for dec_deg in [-80.0_f64, -50.0, -10.0, 15.0, 60.0] {
+            let dec = dec_deg * DEG;
+            let (sd, cd) = dec.sin_cos();
+            // ITRS direction with longitude equal to the observer's: transit.
+            let d_itrs = [cd * cl, cd * sl, sd];
+            let icrs_dir = mat_vec(&transpose(&m), d_itrs);
+            let star = SkyCoord::<Icrs>::from_vector(icrs_dir).expect("nonzero");
+            let altaz = icrs_to_altaz_at(star, obs, &c);
+            let expect_alt = PI / 2.0 - (obs.lat_rad - dec).abs();
+            assert!(
+                (altaz.lat() - expect_alt).abs() < 1e-12,
+                "dec={dec_deg}: alt={} expected {expect_alt}",
+                altaz.lat()
+            );
+            let expect_az = if dec > obs.lat_rad { 0.0 } else { PI };
+            assert!(angle_gap(altaz.lon(), expect_az) < 1e-10, "dec={dec_deg}");
+        }
+    }
+
+    #[test]
+    fn geodetic_observer_itrs_position_is_on_the_ellipsoid() {
+        let obs = GeodeticObserver::from_degrees(0.0, 0.0, 0.0);
+        let p = obs.itrs_position();
+        assert!((p[0] - WGS84.semi_major_axis()).abs() < 1e-6);
     }
 }

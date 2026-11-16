@@ -36,6 +36,9 @@
 //! - `era`: `ut1_hi ut1_lo` -> Earth rotation angle in radians.
 //! - `c2t`: `tt_hi tt_lo ut1_hi ut1_lo xp yp` -> the nine elements of the ICRS
 //!   to ITRS matrix, with `xp`, `yp` in radians (row-major).
+//! - `altaz`: `ra_deg dec_deg lon_deg lat_deg tt_hi tt_lo ut1_hi ut1_lo xp_arcsec yp_arcsec`
+//!   -> `az_deg alt_deg` for an ICRS direction seen from a WGS84 geodetic observer
+//!   (no refraction, aberration or parallax; see `frames::icrs_to_altaz_at`).
 //! - `c2t_xys`: `x y s era sp xp yp` (radians) -> the nine elements of the
 //!   chain matrix built from those components (row-major). Used with ERFA's
 //!   own `xys06a`, `era00` and `sp00` to isolate the matrix algebra.
@@ -45,7 +48,10 @@ use std::io::{self, BufRead, Write};
 use tpt_planetary_astro::cio;
 use tpt_planetary_astro::eop::ARCSEC_TO_RAD;
 use tpt_planetary_astro::ephemeris::earth_sun_distance_au_approx;
-use tpt_planetary_astro::frames::{Icrs, MeanEcliptic, SkyCoord, polar_motion_matrix};
+use tpt_planetary_astro::frames::{
+    GeodeticObserver, Icrs, MeanEcliptic, SkyCoord, TransformContext, icrs_to_altaz_at,
+    polar_motion_matrix,
+};
 use tpt_planetary_astro::nutation;
 use tpt_planetary_astro::precession;
 use tpt_planetary_astro::time;
@@ -178,6 +184,13 @@ fn main() {
                         .map(f64::to_string)
                         .collect::<Vec<_>>()
                         .join(" ")
+                }),
+                "altaz" => parse_fields(&line, 10).map(|v| {
+                    let star = SkyCoord::<Icrs>::from_degrees(v[0], v[1]);
+                    let obs = GeodeticObserver::from_degrees(v[2], v[3], 0.0);
+                    let ctx = TransformContext::new((v[4], v[5]), (v[6], v[7]), v[8], v[9]);
+                    let a = icrs_to_altaz_at(star, obs, &ctx);
+                    format!("{} {}", a.lon_deg(), a.lat_deg())
                 }),
                 _ => None,
             };
