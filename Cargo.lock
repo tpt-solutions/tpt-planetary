@@ -576,6 +576,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "serde_json",
  "tpt-planetary-array",
  "tpt-planetary-astro",
  "tpt-planetary-core",

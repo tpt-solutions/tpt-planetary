@@ -129,7 +129,12 @@ as a type parameter. Frame transforms are implemented for these pairs:
 - ICRS and Galactic (fixed rotation from the J2000 Galactic pole constants);
 - ICRS and mean ecliptic of J2000 (IAU 1976 obliquity);
 - ICRS to true ecliptic, with an obliquity supplied by the caller;
-- ICRS to Alt/Az for an `Observer` and a local sidereal time.
+- ICRS to Alt/Az for an `Observer` and a local sidereal time (the older,
+  apparent-RA helper, `icrs_to_altaz`);
+- ICRS, CIRS, TIRS and ITRS, in all twelve ordered pairs, with the epoch and
+  Earth orientation supplied (see [Typed CIRS, TIRS and ITRS](#typed-cirs-tirs-and-itrs));
+- ICRS to Alt/Az for a `GeodeticObserver` on WGS84, at a given epoch (see
+  [Alt/Az from a geodetic observer](#altaz-from-a-geodetic-observer)).
 
 The example below converts M31's ICRS position to Galactic, round-trips it,
 and computes its altitude and azimuth at an observer for local sidereal time
@@ -167,9 +172,8 @@ Known gaps in the frame layer:
   on the open list.
 - IAU 2006 precession (`tpt_planetary_astro::precession`) is implemented as a
   mean-equator-of-date transform with no nutation and no frame bias. Nutation,
-  aberration and proper motion are not implemented. There are no typed ITRS,
-  CIRS or TIRS frames; the matrices are in `astro::cio` (below). The geodetic
-  observer has no polar motion, and its height is ignored.
+  aberration and proper motion are not implemented. The `Observer` used by
+  `icrs_to_altaz` has no polar motion, and its height is ignored.
 - The polar-motion sign convention is checked against `erfa.pom00` and
   `erfa.c2t06a` (see [Validation](validation.md)).
 
@@ -207,6 +211,70 @@ Accuracy against pyerfa over 1900-2100 (see [Validation](validation.md)):
 Not included: IAU 2000B; the polar-motion history term of s' (Eqs. 5.4 and
 5.12, bounded by the chapter at 0.4 mas per century); UT1 and polar motion,
 which are inputs (no IERS data is bundled); The module needs `std`.
+
+## Typed CIRS, TIRS and ITRS
+
+`frames` has the marker types `Cirs`, `Tirs` and `Itrs`. They implement the
+`Frame` trait, like `Icrs`. Their coordinates are directions, so a `SkyCoord` holds a
+right ascension or longitude and a latitude as for ICRS.
+
+Transforms that depend on the epoch take a `TransformContext`, which carries
+the TT and UT1 two-part Julian dates and the polar coordinates `xp`, `yp`:
+
+```rust
+use tpt_planetary_astro::frames::{Cirs, Icrs, Itrs, SkyCoord, TransformContext};
+
+// TT, UT1 (both as (hi, lo)), and polar motion in arcseconds.
+let ctx = TransformContext::new((2_451_545.0, 0.0), (2_451_545.0, 0.0), 0.1, 0.2);
+let star = SkyCoord::<Icrs>::from_degrees(10.6847, 41.2687);
+let itrs = star.transform_at::<Itrs>(&ctx);
+let back = itrs.transform_at::<Icrs>(&ctx);
+```
+
+`transform_at` applies a rotation: `ICRS -> CIRS` is `Q`, `CIRS -> TIRS` is the Earth
+rotation `R3(ERA)`, and `TIRS -> ITRS` is the polar motion with the TIO locator.
+Each step is orthogonal, so the inverse of each transform is its transpose. The
+composition `ICRS -> CIRS -> TIRS -> ITRS` equals `cio::icrs_to_itrs` at the
+same epoch, and a round trip returns the input to rounding error. The existing
+`FrameTransform` methods, which take no epoch, are unchanged.
+
+The TIO locator is the secular value `-47 uas t` (see `cio::tio_locator`). The
+polar-motion history term of Eq. 5.4 is not computed, so the transforms do not
+take a polar-motion time series. The inputs are only `xp` and `yp` at one
+epoch. No EOP table is read.
+
+## Alt/Az from a geodetic observer
+
+`frames::icrs_to_altaz_at(coord, observer, ctx)` gives the altitude and azimuth
+of an ICRS direction seen from a `GeodeticObserver`. The observer is a longitude
+east, a geodetic latitude and a height on WGS84. The direction is rotated to
+ITRS with the CIO chain, and the altitude and azimuth are then taken from the
+ellipsoid normal and the local east and north. Azimuth is measured from north
+through east.
+
+The example below uses J2000.0 TT and UT1, zero polar motion, and an observer at
+London. It prints the values the crate returns (from `validation_dump altaz`,
+which calls the same function):
+
+```rust
+use tpt_planetary_astro::frames::{GeodeticObserver, Icrs, SkyCoord, TransformContext, icrs_to_altaz_at};
+
+let ctx = TransformContext::new((2_451_545.0, 0.0), (2_451_545.0, 0.0), 0.0, 0.0);
+let m31 = SkyCoord::<Icrs>::from_degrees(10.6847, 41.2687);
+let london = GeodeticObserver::from_degrees(-0.13, 51.5, 0.0);
+let altaz = icrs_to_altaz_at(m31, london, &ctx);
+println!("altaz az={:.4} alt={:.4}", altaz.lon_deg(), altaz.lat_deg());
+```
+
+```text
+altaz az=61.1401 alt=30.8827
+```
+
+Not applied: atmospheric refraction, annual and diurnal aberration, light
+deflection and parallax. The observer's height does not change the result for a
+direction at infinity. Polar motion and UT1 are the caller's inputs. The
+validation against Astropy and ERFA, and the size of the excluded effects, are
+in [Validation](../validation.md).
 
 ## Ephemerides
 

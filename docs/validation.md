@@ -10,8 +10,8 @@ beyond that, and they are not a claim about the full algorithms.
 
 | Package | Version | Used for |
 | --- | --- | --- |
-| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00`, `erfa.p06e`, `erfa.fal03` to `erfa.fapa03`, `erfa.nut06a`, `erfa.ee06a`, `erfa.num06a`, `erfa.gst06a`, `erfa.xy06`, `erfa.xys06a`, `erfa.s06`, `erfa.sp00`, `erfa.bp00`, `erfa.eect00`, `erfa.c2i06a`, `erfa.c2t06a` |
-| astropy | 8.0.2 | `LeapSeconds.from_iers_leap_seconds` (bundled list, read offline), `SkyCoord` (ICRS, Galactic, `BarycentricMeanEcliptic`, `GeocentricMeanEcliptic`), `astropy.wcs.WCS` (wcslib) |
+| pyerfa | 2.0.1.5 | `erfa.dat`, `erfa.dtdb`, `erfa.era00`, `erfa.gmst06`, `erfa.obl06`, `erfa.rx`, `erfa.bp06`, `erfa.pom00`, `erfa.epv00`, `erfa.p06e`, `erfa.fal03` to `erfa.fapa03`, `erfa.nut06a`, `erfa.ee06a`, `erfa.num06a`, `erfa.gst06a`, `erfa.xy06`, `erfa.xys06a`, `erfa.s06`, `erfa.sp00`, `erfa.bp00`, `erfa.eect00`, `erfa.c2i06a`, `erfa.c2t06a`, `erfa.apco`, `erfa.atciq`, `erfa.atioq`, `erfa.atco13` (Alt/Az references) |
+| astropy | 8.0.2 | `LeapSeconds.from_iers_leap_seconds` (bundled list, read offline), `SkyCoord` (ICRS, Galactic, `BarycentricMeanEcliptic`, `GeocentricMeanEcliptic`, ICRS to `AltAz`), `astropy.wcs.WCS` (wcslib), `astropy.utils.iers` (bundled IERS-B UT1-UTC and polar motion, offline) |
 | numpy | 2.5.4 | sampling and vector arithmetic |
 
 Quantities the Python bindings do not expose (TDB, obliquity, the ecliptic
@@ -70,6 +70,10 @@ passing, so the status cannot drift silently.
 | Convention guard: chain not transposed | `erfa.c2t06a` | same, one epoch | the transpose differs by about 2 | > 1e-5 | pass |
 | ICRS -> ITRS matrix, end to end (our X, Y, s, ERA, s', polar motion) | `erfa.c2t06a` (pyerfa 2.0.1.5) | same 200 epochs; xp = yp = 0, and xp, yp = 0.1, 0.2 arcsec | 1.76e-11 rad = 3.63 uas, the same with and without polar motion | 2.5e-11 rad (about 5 uas) | pass |
 | ERFA's own X, Y routes: `erfa.xys06a` against `erfa.xy06` | pyerfa 2.0.1.5 | same 200 epochs | 3.63 uas (X and Y) | must exceed 1 uas (the guard that explains the row above) | pass (reference ambiguity) |
+| Alt/Az of ICRS directions, geodetic observer (ours) vs ERFA without annual aberration | `erfa.apco` with zero Earth velocity, `erfa.atciq`, `erfa.atioq` (pyerfa 2.0.1.5) | 3 UTC epochs (2000-01-01 12h, 2010-07-01 0h, 2020-03-15 6h) x 2 observers x 200 random directions | 0.37 arcsec (mean 0.21 arcsec); the maximum is 3 degrees from the Sun, see the Alt/Az section | 0.5 arcsec | pass (scope: no refraction, aberration, light deflection or parallax in ours) |
+| Alt/Az reference check: Astropy `AltAz` (pressure 0) vs `erfa.atco13` | `erfa.atco13` (pyerfa 2.0.1.5) | same 6 epoch-observer sets x 200 directions | 6.8e-9 arcsec | 1 mas | pass |
+| Alt/Az, ours vs Astropy `AltAz`, after removing annual aberration | `SkyCoord.transform_to(AltAz)` (astropy 8.0.2), with the ERFA no-annual-aberration reference | same 1200 directions | Astropy minus ours is 19.9 to 21.2 arcsec, the annual aberration (20.1 to 20.8 arcsec, `erfa.apco` difference); after subtracting it the residual is 0.36 arcsec | 0.5 arcsec | pass |
+| TIO locator s' with the polar-motion term (Eq. 5.4) | none: not implemented | - | - | - | not done (see Findings) |
 
 Polar motion and Earth-Sun use `validation_dump` modes `pm` and `esd`, and their
 tests are in `bindings/tpt-planetary-py/tests/validation/test_earth_orientation.py`.
@@ -102,6 +106,44 @@ The files are from `conv.tgz` under `conventions_v1_0_0/2010_official/chapter5/a
 The TIO locator (-47 uas t, Eq. 5.13), the frame-bias constants (Eqs. 5.17,
 5.21, 5.33) and the Table 5.2e definitions are in the chapter text.
 
+### Alt/Az from a geodetic observer
+
+`frames::icrs_to_altaz_at` rotates the ICRS direction to ITRS with the CIO chain
+(`icrs_to_itrs`, with the UT1 and polar-motion inputs given), then takes the
+components along the WGS84 ellipsoid normal (up), east and north. Azimuth is
+measured from north through east. No refraction, aberration, light deflection
+or parallax is applied. The observer height does not enter a direction at
+infinity; the validation dump passes height 0.
+
+The Astropy reference is `SkyCoord.transform_to(AltAz)` with `pressure=0`. Astropy
+always applies annual and diurnal aberration in this transform and offers no
+switch for it, so it cannot be compared with our no-aberration value directly.
+The comparison is made in three steps:
+
+1. Astropy `AltAz` against `erfa.atco13` (which Astropy uses, with aberration):
+   agreement at 1e-8 arcsec. This confirms that the reference is ERFA's route.
+2. Ours against `erfa.apco` with the Earth's barycentric velocity set to zero.
+   That removes the annual aberration. The residual is the diurnal aberration of
+   the observer's rotation (about 0.27 arcsec at these latitudes), plus light
+   deflection by the Sun. The largest residual, 0.37 arcsec, is at 3 degrees
+   from the Sun. Diurnal aberration is still in `apco`, so the reference is not
+   exact at that level.
+3. Astropy minus ours equals the annual aberration displacement (ERFA full minus
+   ERFA without annual aberration), to 0.36 arcsec.
+
+Astropy's UT1-UTC and polar motion from its bundled IERS-B tables are passed to
+the crate and to ERFA as inputs. UT1-UTC is not set to zero, because the bundled
+values are used for both sides. The epochs are 2000-01-01 12:00, 2010-07-01
+00:00 and 2020-03-15 06:00 UTC. The tests are in
+`bindings/tpt-planetary-py/tests/validation/test_altaz.py`.
+
+### TIO locator and the polar-motion term
+
+The crate's `tio_locator` is the secular value `s' = -47 uas t` (Eq. 5.13). It
+is checked against `erfa.sp00` above. Eq. 5.4 defines `s'` as an integral of
+the polar motion, `s' = 1/2 integral (xp yp' - xp' yp) dt`. That term is not
+implemented: see Findings.
+
 ### Nutation inputs
 
 Series: IERS Conventions (2010), Chapter 5, Tables 5.3a and 5.3b (IAU 2000A_R06).
@@ -122,6 +164,18 @@ the CIP X and Y, s and EO series, not F1-F14, so they are not used for the
 arguments. The `tab5.2e` complementary terms are not implemented (see Not validated).
 
 ### Findings
+
+- **TIO locator and the polar-motion term.** The task asked for `s'` with a
+  polar-motion dependent term as a function of an (xp, yp) series, with
+  constant polar motion reducing to -47 uas per century. The chapter does not
+  support that. Eq. 5.4 is `s' = 1/2 integral (xp yp' - xp' yp) dt` (the
+  dots are lost in the text extraction). That integral is zero for constant
+  polar motion, and it has an integration constant that the chapter does not
+  state. The -47 uas per century term is Eq. 5.13, which the chapter derives from the
+  mean Chandler and annual amplitudes (Eq. 5.12), not from a polar-motion series.
+  `erfa.sp00` returns -47 uas per century for any input, so it cannot check a
+  series-dependent term. The series form was not implemented, and `tio_locator`
+  is unchanged.
 
 - **Earth rotation angle rounding (fixed).** `time::earth_rotation_angle`
   multiplied the whole Tu, about 3.6e4 days at 1900, by 1.00273781191135448
@@ -259,7 +313,7 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   UT1-UTC = 0 as specified.
 - **Ephemerides.** The SPK/DAF reader, Chebyshev evaluation and light time are
   not validated against JPL. The required kernels are not in this repository.
-  `earth_sun_distance_km` (SPK) is not compared; only the analytic helper is.- **Other frames.** ICRS -> AltAz and ITRS/geodetic conversions are not compared.
+  `earth_sun_distance_km` (SPK) is not compared; only the analytic helper is.- **Other frames.** ICRS -> AltAz is compared only with refraction, aberration, light deflection and parallax excluded (see the Alt/Az section). The observed (refracted) place is not validated. The ITRS to geodetic conversion is not compared.
 - **WCS scope.** Only TAN, SIN and AIT, with LONPOLE and LATPOLE left to their
   defaults. Explicit LONPOLE and LATPOLE values, the PC and CD mix, SIP, TPV,
   alternative descriptions and other projections are not compared. The antimeridian

@@ -238,8 +238,7 @@ pub struct Triple {
 #[macro_export]
 macro_rules! triple {
     ($s:expr) => {
-        <$crate::Triple as ::core::str::FromStr>::from_str($s)
-            .expect("invalid target triple")
+        <$crate::Triple as ::core::str::FromStr>::from_str($s).expect("invalid target triple")
     };
 }
 
@@ -285,7 +284,8 @@ impl Triple {
             environment,
             binary_format: BinaryFormat::Unknown,
         };
-        triple.binary_format = default_binary_format(&triple.operating_system, &triple.architecture);
+        triple.binary_format =
+            default_binary_format(&triple.operating_system, &triple.architecture);
         triple
     }
 }
@@ -301,7 +301,9 @@ impl FromStr for Triple {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split('-').collect();
         if parts.iter().any(|p| p.is_empty()) {
-            return Err(ParseError::new(format!("invalid target triple {s:?}: empty component")));
+            return Err(ParseError::new(format!(
+                "invalid target triple {s:?}: empty component"
+            )));
         }
         let (arch, vendor, os, env) = match parts.as_slice() {
             [arch] => (*arch, "unknown", "unknown", None),
@@ -327,14 +329,19 @@ impl FromStr for Triple {
             binary_format: BinaryFormat::Unknown,
             operating_system,
         };
-        triple.binary_format = default_binary_format(&triple.operating_system, &triple.architecture);
+        triple.binary_format =
+            default_binary_format(&triple.operating_system, &triple.architecture);
         Ok(triple)
     }
 }
 
 impl fmt::Display for Triple {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}-{}", self.architecture, self.vendor, self.operating_system)?;
+        write!(
+            f,
+            "{}-{}-{}",
+            self.architecture, self.vendor, self.operating_system
+        )?;
         if self.environment != Environment::Unknown {
             write!(f, "-{}", self.environment)?;
         }
@@ -525,7 +532,10 @@ fn is_known_os(s: &str) -> bool {
 }
 
 fn is_known_env(s: &str) -> bool {
-    !matches!(parse_environment(s), Environment::Other(_) | Environment::Unknown)
+    !matches!(
+        parse_environment(s),
+        Environment::Other(_) | Environment::Unknown
+    )
 }
 
 fn default_binary_format(os: &OperatingSystem, arch: &Architecture) -> BinaryFormat {
@@ -584,7 +594,10 @@ mod tests {
     #[test]
     fn components_are_parsed() {
         let t = triple!("i686-pc-windows-msvc");
-        assert_eq!(t.architecture, Architecture::X86_32(X86_32Architecture::I686));
+        assert_eq!(
+            t.architecture,
+            Architecture::X86_32(X86_32Architecture::I686)
+        );
         assert_eq!(t.vendor, Vendor::Pc);
         assert_eq!(t.operating_system, OperatingSystem::Windows);
         assert_eq!(t.environment, Environment::Msvc);
@@ -607,11 +620,17 @@ mod tests {
     #[test]
     fn darwin_and_ios_keep_version_suffix() {
         let t = triple!("aarch64-apple-darwin21.0");
-        assert_eq!(t.operating_system, OperatingSystem::Darwin(Some("21.0".to_string())));
+        assert_eq!(
+            t.operating_system,
+            OperatingSystem::Darwin(Some("21.0".to_string()))
+        );
         assert_eq!(t.binary_format, BinaryFormat::Macho);
         assert_eq!(t.to_string(), "aarch64-apple-darwin21.0");
 
-        assert_eq!(triple!("aarch64-apple-ios").operating_system, OperatingSystem::IOS(None));
+        assert_eq!(
+            triple!("aarch64-apple-ios").operating_system,
+            OperatingSystem::IOS(None)
+        );
     }
 
     #[test]
@@ -621,8 +640,14 @@ mod tests {
 
     #[test]
     fn equal_strings_give_equal_triples() {
-        assert_eq!(triple!("x86_64-unknown-linux-gnu"), triple!("x86_64-unknown-linux-gnu"));
-        assert_ne!(triple!("x86_64-unknown-linux-gnu"), triple!("x86_64-unknown-linux-musl"));
+        assert_eq!(
+            triple!("x86_64-unknown-linux-gnu"),
+            triple!("x86_64-unknown-linux-gnu")
+        );
+        assert_ne!(
+            triple!("x86_64-unknown-linux-gnu"),
+            triple!("x86_64-unknown-linux-musl")
+        );
     }
 
     #[test]

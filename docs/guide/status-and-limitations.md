@@ -50,6 +50,13 @@ None of the four milestones in `todo.md` is met yet.
   `erfa.pom00` and `erfa.c2t06a` (see `docs/validation.md`).
 - **TDB.** Only three terms of the series are used, so the result is an
   approximation with a truncation bound of about 1.7 ms.
+- **Alt/Az.** `icrs_to_altaz_at` applies no atmospheric refraction, no annual or
+  diurnal aberration, no light deflection and no parallax. Its validation
+  against Astropy therefore includes the annual aberration (about 20 arcsec)
+  as a known difference. The observed (refracted) place is not implemented.
+- **Polar motion history.** No EOP series is bundled. `xp` and `yp` are inputs,
+  and the TIO locator is the secular value `-47 uas t`. The polar-motion term
+  of Eq. 5.4, which needs a polar-motion time series, is not computed.
 - **Leap-second table expiry.** `EMBEDDED` is valid until 2027-06-28. After
   that, UTC conversions fail. The table must be re-checked before each release.
 
@@ -104,8 +111,9 @@ Not implemented:
 
 ## CLI
 
-`array math` and `array convert` exit with 3. `astro convert` supports only
-utc, tai and tt. `ephemeris query` needs a kernel path. See
+`array math` writes Zarr only, and `array convert` supports int8 to float64
+only. `astro convert` supports the time scales utc, tai and tt and the frames
+icrs, galactic and ecliptic (mean J2000); TDB and other frames exit with 3. `ephemeris query` needs a kernel path. See
 [Command line](cli.md).
 
 ## Python bindings

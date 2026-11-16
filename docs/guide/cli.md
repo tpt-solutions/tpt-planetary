@@ -35,19 +35,28 @@ Shows the shape, dtype, chunk shape and attributes of a Zarr array. Only a
 A path that does not exist exits with 1. A directory without Zarr metadata
 exits with 1.
 
-### `tptplan array math <EXPRESSION>`: not implemented
+### `tptplan array math <EXPRESSION> --input NAME=PATH ... --output PATH`
 
-Exits with 3. There is no expression parser in the CLI. The lazy API in
-`tpt-planetary-array` is available from Rust.
+Evaluates an expression lazily over named Zarr arrays and writes a float64 Zarr
+array (`--zarr-format 2|3`, default 2), chunk by chunk. Grammar: `+ - * /`,
+unary minus, parentheses, numeric constants. Syntax errors exit with 2 and a
+column; a missing input exits with 1. Output is Zarr only; NetCDF-3 output is not
+implemented.
 
-### `tptplan array convert <INPUT> <OUTPUT>`: not implemented
+### `tptplan array convert <INPUT> <OUTPUT>`
 
-Exits with 3. Zarr to NetCDF-3 conversion has no CLI wiring yet, although the
-NetCDF-3 reader and writer exist in the array crate.
+Converts between a Zarr directory and a NetCDF-3 file. The direction follows the
+input: a `.nc` input is read as NetCDF-3, and a Zarr directory is written as
+NetCDF-3 when the output ends in `.nc`. Supported types are int8, int16, int32,
+float32 and float64; other types exit with 1. Dimension names, attributes and
+`_FillValue` are kept. CF time decoding and NetCDF-4 are not supported. Existing
+outputs are refused.
 
 ### `tptplan astro convert <VALUE> --from <SCALE> --to <SCALE>`
 
-Converts an ISO 8601 timestamp between the time scales `utc`, `tai` and `tt`.
+Converts an ISO 8601 timestamp between the time scales `utc`, `tai` and `tt`. The
+command also converts coordinates between the frames `icrs`, `galactic` and
+`ecliptic` (mean J2000); other frames exit with 3.
 Timestamps are `YYYY-MM-DDTHH:MM:SS[.fraction]` with no time-zone designator.
 Frames, such as `ra,dec`, are not supported and exit with 3.
 

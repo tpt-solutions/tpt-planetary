@@ -210,5 +210,5 @@ The `noleap` result shows that 366 days from 2000-01-01 falls on 2001-01-02
 in a calendar with no leap days.
 
 The `Array` API and the NetCDF-3 API are separate. There is no conversion
-between Zarr and NetCDF-3 yet, and the CLI `array convert` command reports
-that it is not implemented.
+between Zarr and NetCDF-3 through the CLI: `tptplan array convert` converts in
+either direction for int8 to float64 variables.

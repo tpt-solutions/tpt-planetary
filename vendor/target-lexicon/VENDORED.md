@@ -11,3 +11,5 @@ LLVM-exception. The workspace uses it through `[patch.crates-io]` in the root
 
 Local changes: none. Update by re-copying from the source commit, and record
 the new commit here.
+
+Formatting only: rustfmt was applied to src/lib.rs so that `cargo fmt --check` passes. No code changed.
