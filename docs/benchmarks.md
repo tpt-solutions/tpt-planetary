@@ -123,14 +123,13 @@ needs to be well outside that band before it means anything.
   measured.
 - Scalar accuracy of the astro benchmarks. They time the transforms only.
 
-## Comparisons not done yet
+## Comparisons still open
 
-The `todo.md` items for benchmarks against Astropy, xarray and netCDF4 are
-open. To do them properly they need:
+The Astropy frame comparison and the NetCDF and xarray comparison are done (see
+the sections above and below). The following still need to be done properly:
 
-- **Reference implementations on the same machine.** Astropy (time and frame
-  transforms), xarray with netCDF4 or h5netcdf (open, slice, mean), and the
-  Zarr reference (`zarr-python`) for the chunk read. Record the exact versions
+- **Reference implementations on the same machine.** Astropy for time scales, and
+  the Zarr reference (`zarr-python`) for the chunk read. Record the exact versions
   of each in the results.
 - **Matched workloads.** The same array shape, dtype, chunking and
   compression. For time conversion, the same number of epochs and the same
@@ -187,3 +186,62 @@ building the `SkyCoord`.
 | astropy 8.0.2 | `SkyCoord.transform_to("galactic")` | 1.885 ms | 1.851 ms |
 
 The two outputs agree to 0.025 arcsec (see `docs/validation.md`).
+
+## Reference comparison: NetCDF and xarray (Windows, Python)
+
+Script: `bindings/tpt-planetary-py/examples/bench_vs_netcdf.py`. It writes one
+2-D float64 field of 720 x 1440 (8.3 MB, seeded normal values, mean about 15)
+into a temporary directory, as two files:
+
+- a NetCDF-3 classic file, written with netCDF4 and `format="NETCDF3_CLASSIC"`;
+- a Zarr v2 directory, written by the script (uncompressed, little-endian
+  `<f8`, chunks 180 x 360, 16 chunk files).
+
+It times three operations. Each timed run starts with a fresh open. One warm-up
+run is discarded, then 5 timed runs are taken and the median is reported.
+
+- `open`: open the dataset and read shape and dtype. No data is read.
+- `slice`: open, then read `[200:520, 300:900]` into NumPy (320 x 600).
+- `mean`: open, then the mean over the whole field.
+
+Before timing, the script checks that the three means agree with the in-memory
+mean to 1e-9 relative.
+
+Command (from the repository root, with the project venv):
+
+    "<venv>/Scripts/python.exe" bindings/tpt-planetary-py/examples/bench_vs_netcdf.py --runs 5
+
+Machine: Intel Core i7-12700 (12 cores, 20 threads, 2.1 GHz base), 15.7 GB RAM,
+WD PC SN740 512 GB NVMe SSD, Windows 11 Pro 10.0.26200. Python 3.13.7, numpy
+2.5.4, xarray 2026.9.0, netCDF4 1.7.5.1.post1, `tpt_planetary` 0.1.0 (editable
+install in the venv). Both files live on the same SSD and are in the OS file
+cache during the timed runs.
+
+| Library (format read) | open (ms) | slice (ms) | mean (ms) |
+| --- | ---: | ---: | ---: |
+| netCDF4 + numpy (NetCDF-3) | 2.52 (2.41-2.58) | 4.17 (4.09-4.30) | 9.16 (8.77-9.77) |
+| xarray + numpy (NetCDF-3, netCDF4 engine) | 2.95 (2.93-3.00) | 4.50 (4.48-4.52) | 8.37 (8.26-8.63) |
+| tpt_planetary (Zarr v2, release build) | 0.44 (0.42-0.47) | 2.46 (2.41-3.04) | 15.40 (15.34-15.67) |
+
+Cells are median (min-max) of the 5 timed runs.
+
+What is and is not comparable:
+
+- **Different file formats.** The Python bindings cannot read NetCDF-3, so
+  `tpt_planetary` is timed on the Zarr v2 copy of the same values, not on the
+  NetCDF-3 file. The rows measure different formats and different readers. They
+  are not a like-for-like file-format comparison.
+- **Build profile.** The tpt_planetary rows were re-measured after
+  `maturin develop --release`. An earlier debug-build run is superseded and not
+  quoted.
+- **Work done per call.** The `mean` row for tpt_planetary streams all chunks
+  through the lazy engine with a per-element NaN/fill check and Welford update.
+  netCDF4 and xarray call the C library and then NumPy's vectorised mean.
+- **Warm cache only.** Every timed run reads from the OS file cache. No cold
+  run, and no remote storage, was measured.
+- **Single machine, single field size.** Results are not generalised to other
+  shapes, chunkings, compressors or machines.
+- **What is compared.** Only open, slice and mean. No write speed, no
+  compression, no CF decoding, and no xarray dask chunking.
+- **Agreement is checked.** The three means agree before timing, so no timing
+  is taken for a wrong result.
