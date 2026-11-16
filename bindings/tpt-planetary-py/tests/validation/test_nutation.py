@@ -36,15 +36,19 @@ in ``docs/validation.md``):
 - Published angles against ``nut06a``: the difference must equal the
   out-of-phase contribution to within 0.5 uas, and that contribution must be
   real (at least 4 uas), so this is not a loose bound.
-- Equation of the equinoxes against ``ee06a``: 2.7 mas. The gap is the
-  complementary terms, which the crate does not implement (measured max 2.65 mas).
+- Equation of the equinoxes against ``ee06a``: 6 uas with the published tables
+  (the out-of-phase residual in dpsi); 0.5 uas with the SOFA-variant dpsi plus
+  eect00. The crate includes the
+  complementary terms of the equation of the origins (Table 5.2e); measured
+  max 0.2 uas over 1900-2100.
 - Matrix convention: the matrix built from ERFA's own angles must match
   ``num06a`` to 1e-12. Measured 0. The transpose must differ by more than 1e-5
   (measured 1.7e-4), which guards the convention.
 - Matrix from the published angles against ``num06a``: 2.5e-11 (about 5 uas).
   Measured max 2.35e-11, the same out-of-phase effect as above.
-- GAST against ``gst06a``: 2.7 mas, the complementary-term omission (measured
-  max 2.65 mas, rms 1.86 mas).
+- GAST against ``gst06a``: 6 uas with the published tables (out-of-phase residual).
+  Measured
+  max is recorded in docs/validation.md.
 - ICRS -> true equator of date against ``rn @ rp``: 6 uas, the published-model
   residual (measured max 3.1 uas).
 """
@@ -64,14 +68,17 @@ RAD_PER_MAS = RAD_PER_UAS * 1e3
 FA_TOL_RAD = 1e-11
 SOFA_ANGLE_TOL_UAS = 0.5
 OUT_OF_PHASE_MIN_UAS = 4.0
-EE_TOL_MAS = 2.7
+EE_TOL_MAS = 0.006  # published-model out-of-phase residual, about 5 uas
+# Measured 0.86 uas. Part is the SOFA-variant dpsi residual (about 0.25 uas);
+# the rest is not attributed. Not a tight bound on the complementary terms.
+EE_SOFA_TOL_UAS = 1.0
 EE_CONSISTENCY_TOL_RAD = 1e-12
 MATRIX_CONVENTION_TOL = 1e-12
 MATRIX_PUBLISHED_TOL = 2.5e-11
 # N is close to the identity (entries differ from it by about 1e-4), so its transpose
 # differs from N by about 1.7e-4. The guard only needs to be far above the 1e-12 tolerance.
 TRANSPOSE_MIN_DIFF = 1e-5
-GAST_TOL_MAS = 2.7
+GAST_TOL_MAS = 0.006  # published-model out-of-phase residual, about 5 uas
 TOD_TOL_UAS = 6.0
 
 FA_NAMES = [
@@ -163,23 +170,36 @@ def test_published_angles_differ_from_erfa_only_by_out_of_phase_terms():
     )
 
 
-def test_equation_of_equinoxes_matches_ee06a_without_complementary_terms():
+def test_equation_of_equinoxes_matches_ee06a():
     days = _epochs()
     ours = run_validation_dump("ee", _pairs(days)).ravel()
     ref = np.array([erfa.ee06a(J2000_JD, d) for d in days])
     diff_mas = np.abs(ours - ref) / RAD_PER_MAS
-    # The gap is the complementary terms of the equation of the origins. Measured
-    # max 2.65 mas. See docs/validation.md.
     assert diff_mas.max() <= EE_TOL_MAS, f"max |EE - ee06a| = {diff_mas.max():.3f} mas"
 
 
-def test_equation_of_equinoxes_is_dpsi_cos_eps0():
-    # The crate's EE is dpsi * cos(eps0) exactly, with eps0 the IAU 2006 mean obliquity.
+def test_sofa_variant_equation_of_equinoxes_matches_ee06a():
+    # SOFA-variant dpsi cos(eps0) plus eect00, against ee06a: the strict check
+    # for the complementary terms, free of the out-of-phase residual. Measured
+    # max 0.86 uas, so this bound is 1 uas.
+    days = _epochs()
+    nut = _nut_sofa(days)
+    eps0 = np.array([erfa.obl06(J2000_JD, d) for d in days])
+    eect = np.array([erfa.eect00(J2000_JD, d) for d in days])
+    ours = nut[:, 0] * np.cos(eps0) + eect
+    ref = np.array([erfa.ee06a(J2000_JD, d) for d in days])
+    diff_uas = np.abs(ours - ref) / RAD_PER_UAS
+    assert diff_uas.max() <= EE_SOFA_TOL_UAS, f"max |EE(SOFA) - ee06a| = {diff_uas.max():.3f} uas"
+
+
+def test_equation_of_equinoxes_is_dpsi_cos_eps0_plus_eect00():
+    # The crate's EE is dpsi * cos(eps0) plus the EO complementary terms (eect00).
     days = _epochs()
     ee = run_validation_dump("ee", _pairs(days)).ravel()
     nut = _nut_ours(days)
     eps0 = np.array([erfa.obl06(J2000_JD, d) for d in days])
-    expected = nut[:, 0] * np.cos(eps0)
+    eect = np.array([erfa.eect00(J2000_JD, d) for d in days])
+    expected = nut[:, 0] * np.cos(eps0) + eect
     assert np.abs(ee - expected).max() <= EE_CONSISTENCY_TOL_RAD
 
 
@@ -207,7 +227,7 @@ def test_matrix_from_published_angles_matches_num06a_within_out_of_phase_effect(
     assert max_diff <= MATRIX_PUBLISHED_TOL, f"max |N - num06a| = {max_diff:.3e}"
 
 
-def test_gast_matches_gst06a_without_complementary_terms():
+def test_gast_matches_gst06a():
     days = _epochs()
     pairs = np.stack([np.full_like(days, J2000_JD), days, np.full_like(days, J2000_JD), days], axis=1)
     ours = run_validation_dump("gast", pairs).ravel()

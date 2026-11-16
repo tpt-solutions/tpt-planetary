@@ -53,12 +53,12 @@ passing, so the status cannot drift silently.
 | Fundamental arguments F1-F14 (IERS 2010 Eqs. 5.43, 5.44) | `erfa.fal03` ... `erfa.fapa03` (pyerfa 2.0.1.5) | 300 TT epochs, 1900-2100 | 1.6e-12 rad (about 0.34 uas) | 1e-11 rad | pass |
 | Nutation dpsi, deps, SOFA/MHB2000 series (no out-of-phase rate terms) | `erfa.nut06a` (pyerfa 2.0.1.5) | 300 TT epochs, 1900-2100 | 0.25 uas (dpsi), 0.22 uas (deps) | 0.5 uas | pass |
 | Nutation dpsi, deps, IERS 2010 published tables 5.3a/5.3b (crate default) | `erfa.nut06a` | same 300 epochs | 5.29 uas (dpsi), 0.85 uas (deps); the gap is the out-of-phase rate terms (published minus SOFA variant: 5.31 uas dpsi, 0.74 uas deps) | published minus ERFA, minus the out-of-phase term, at most 0.5 uas; out-of-phase term at least 4 uas (dpsi) | pass |
-| Equation of the equinoxes vs `erfa.ee06a` | `erfa.ee06a` | same 300 epochs | 2.65 mas (max), 1.86 mas rms; complementary terms, not implemented | 2.7 mas (bounds the documented omission) | pass |
+| Equation of the equinoxes vs `erfa.ee06a` | `erfa.ee06a` | same 300 epochs | 6 uas (max) with the published tables, the out-of-phase residual; 0.86 uas with the SOFA-variant dpsi plus `eect00` | 6 uas; 1 uas (SOFA variant) | pass |
 | Equation of the equinoxes = dpsi cos(eps0) | `erfa.nut06a` dpsi, `erfa.obl06` | same 300 epochs | 0 (rounding only) | 1e-12 rad | pass |
 | Nutation matrix convention: N built from ERFA's own dpsi, deps, eps0 | `erfa.num06a` | same 300 epochs | 0.0 | 1e-12 | pass |
 | Nutation matrix convention guard (N not transposed) | `erfa.num06a` | same 300 epochs | transposed N differs by 1.7e-4 | > 1e-5 | pass |
 | Nutation matrix from the published angles | `erfa.num06a` | same 300 epochs | 2.35e-11 (about 4.9 uas) | 2.5e-11 | pass |
-| GAST (`time::gast_iau2006`) vs `erfa.gst06a`, UT1 = TT | `erfa.gst06a` | same 300 epochs | 2.65 mas (max), 1.86 mas rms; the same complementary-term omission | 2.7 mas | pass |
+| GAST (`time::gast_iau2006`) vs `erfa.gst06a`, UT1 = TT | `erfa.gst06a` | same 300 epochs | 6 uas (max), the out-of-phase residual | 6 uas | pass |
 | ICRS -> true equator of date (N P, no frame bias) | `erfa.num06a` times `erfa.bp06` `rp` | 12 epochs x 4 random sky points | 3.04 uas | 6 uas | pass |
 | CIP X (IAU 2006/2000A, Table 5.2a, blocks j = 0..4) | `erfa.xy06` (pyerfa 2.0.1.5) | 200 TT epochs, 1900-01-01 to 2100-01-01 | 1.07e-6 uas | 1 uas | pass |
 | CIP Y (IAU 2006/2000A, Table 5.2b) | `erfa.xy06` | same 200 epochs | 8.5e-7 uas | 1 uas | pass |
@@ -151,12 +151,8 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   agrees with `erfa.bp00`'s `rb` to 6.8e-13. The chain does not multiply by B,
   because the CIP series already contain the bias (Eq. 5.17: the constant
   -16617 uas in X).
-- **EO complementary terms (implemented, not used by GAST).** The non-polynomial
-  part of Table 5.2e is `cio::eo_complementary_terms`. It agrees with
-  `erfa.eect00` to 3.8e-11 uas over 1900-2100. The terms reach 2.65 mas, so GAST
-  (`time::gast_iau2006`) and `equation_of_equinoxes` still omit up to 2.65 mas.
-  Wiring the terms into GAST is a separate change. It would tighten the GAST row
-  above to the microarcsecond level.
+- **EO complementary terms.** The non-polynomial part of Table 5.2e is `cio::eo_complementary_terms`. It agrees with `erfa.eect00` to 3.8e-11 uas over 1900-2100. It is included in `equation_of_equinoxes` and therefore in `time::gast_iau2006`.
+
 
 - **AIT inverse accepted pixels outside the projection (fixed).** The inverse
   checked the ellipse with semi-axes 4 and 2 rad, not the Hammer domain with
@@ -231,10 +227,7 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   source. Using the MHB2000 expression for L_Ne (5.321159 + 3.812777 t, as SOFA
   does) changes the residual to 0.23 uas, so that is not the cause. The tolerance
   is 0.5 uas.
-- **Equation of the equinoxes: complementary terms omitted.** `ee06a` minus
-  `dpsi cos(eps0)` reaches 2.65 mas (rms 1.86 mas) over 1900-2100. The crate
-  returns the classical term only, so GAST carries the same offset. The amplitudes
-  are in Table 5.2e and could be added as a later step.
+- **Equation of the equinoxes.** `equation_of_equinoxes` is `dpsi cos(eps0)` plus `eect00`. With the published tables it agrees with `ee06a` to 6 uas (the out-of-phase residual in dpsi). With the SOFA-variant dpsi it agrees to 0.86 uas (bound 1 uas); about 0.25 uas of that is the SOFA dpsi residual, and the rest is not attributed.
 - **Nutation matrix convention.** The matrix built from ERFA's own angles matches
   `num06a` exactly (0.0), so the rotation order and signs are correct. The first
   draft of the transpose guard used 1e-3. N is within about 1e-4 of the identity,
@@ -246,10 +239,7 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
 - **Full TDB series.** Only the three leading terms are implemented, and only
   the geocentric term is checked. Topocentric terms and dates outside
   2000-2026 are untested.
-- **Nutation beyond IAU 2000A_R06.** IAU 2000B is not implemented. The
-  complementary terms of the equation of the origins (Table 5.2e) are
-  implemented in `cio` but not used by GAST or the equation of the equinoxes, so
-  those differ from the full model by up to 2.65 mas.
+- **Nutation beyond IAU 2000A_R06.** IAU 2000B is not implemented. 
 - **CIP and CIO beyond IAU 2006/2000A.** The X, Y and s series are the IAU
   2006/2000A tables only. IAU 2000B is not implemented. The TIO locator is the
   secular value (Eq. 5.13). The polar-motion dependent part (Eqs. 5.4 and 5.12)

@@ -42,9 +42,9 @@
 //!
 //! # Equation of the equinoxes
 //!
-//! [`equation_of_equinoxes`] returns `dpsi * cos(eps0)`. The complementary
-//! terms of the equation of the origins (IERS Conventions 2010, Table 5.2e) are
-//! not implemented.
+//! [`equation_of_equinoxes`] returns `dpsi * cos(eps0)` plus the complementary
+//! terms of the equation of the origins (IERS Conventions 2010, Table 5.2e).
+//! Frame bias is not included.
 //!
 //! # Feature flags
 //!
@@ -299,13 +299,17 @@ pub fn nutation_angles(tt_hi: f64, tt_lo: f64) -> (f64, f64) {
     nutation_angles_t(centuries_since_j2000(tt_hi, tt_lo))
 }
 
-/// Equation of the equinoxes in radians: `dpsi * cos(eps0)`, where `eps0` is
-/// the IAU 2006 mean obliquity. The complementary terms are not included.
+/// Equation of the equinoxes in radians: `dpsi * cos(eps0) + C`, where `eps0`
+/// is the IAU 2006 mean obliquity and `C` is the sum of the complementary terms
+/// of the equation of the origins (IERS Conventions 2010, Table 5.2e; see
+/// [`crate::cio::eo_complementary_terms`]). Agrees with `erfa.ee06a` to about 6 uas over
+/// 1900-2100 with the published tables (the out-of-phase residual in dpsi).
 #[cfg(feature = "std")]
 #[must_use]
 pub fn equation_of_equinoxes(tt_hi: f64, tt_lo: f64) -> f64 {
     let (dpsi, _) = nutation_angles(tt_hi, tt_lo);
     dpsi * crate::time::mean_obliquity_iau2006_rad(tt_hi, tt_lo).cos()
+        + crate::cio::eo_complementary_terms(tt_hi, tt_lo)
 }
 
 #[cfg(feature = "std")]

@@ -63,9 +63,8 @@ None of the four milestones in `todo.md` is met yet.
   and matrix, no frame bias). IAU 2000A_R06 nutation is available as
   `tpt_planetary_astro::nutation`: the full luni-solar and planetary series in
   longitude and obliquity, the nutation matrix, and the classical equation of the
-  equinoxes `dpsi cos(eps0)`. Limits: no IAU 2000B, and GAST does not yet include
-  the complementary terms of the equation of the origins (up to 2.65 mas; the
-  terms are in `astro::cio`). No frame bias in the nutation matrix.
+  equinoxes `dpsi cos(eps0)` plus those complementary terms. Limits: no IAU 2000B. the complementary terms of the equation of the
+  origins are included (`astro::cio`). No frame bias in the nutation matrix.
 - The CIP X and Y, the CIO and TIO locators, and the ICRS to ITRS matrix are in
   `tpt_planetary_astro::cio` (IAU 2006/2000A, validated against pyerfa). There is
   no aberration, proper motion, apparent position, or typed ITRS, CIRS or TIRS

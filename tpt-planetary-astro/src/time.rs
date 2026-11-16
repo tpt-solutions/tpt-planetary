@@ -132,9 +132,9 @@ pub fn gmst_iau2006(ut1_hi: f64, ut1_lo: f64, tt_hi: f64, tt_lo: f64) -> f64 {
 /// `GAST = GMST + equation of the equinoxes`, where the equation of the
 /// equinoxes is `dpsi * cos(eps)`. `dpsi` is the nutation in longitude and
 /// `eps` the mean obliquity, both in radians, and must come from a nutation
-/// model supplied by the caller. The complementary terms of the equation of the
-/// origins are omitted. For a self-contained computation from the time alone,
-/// use [`gast_iau2006`].
+/// model supplied by the caller. It does not include the complementary terms of
+/// the equation of the origins. For a self-contained computation from the time
+/// alone, use [`gast_iau2006`], which does include them.
 #[must_use]
 pub fn gast(gmst_rad: f64, dpsi_rad: f64, mean_obliquity_rad: f64) -> f64 {
     wrap_two_pi(gmst_rad + dpsi_rad * mean_obliquity_rad.cos())
@@ -144,9 +144,10 @@ pub fn gast(gmst_rad: f64, dpsi_rad: f64, mean_obliquity_rad: f64) -> f64 {
 /// UT1 and TT with the IAU 2000A_R06 nutation of [`crate::nutation`].
 ///
 /// `GAST = GMST_IAU2006 + equation of the equinoxes`, where the equation of the
-/// equinoxes is [`crate::nutation::equation_of_equinoxes`] (`dpsi * cos(eps0)`).
-/// The complementary terms are omitted, so this differs from the full
-/// equation of the origins by the size quantified in `docs/validation.md`.
+/// equinoxes is [`crate::nutation::equation_of_equinoxes`]: `dpsi * cos(eps0)`
+/// plus the complementary terms of the equation of the origins. Agrees with
+/// `erfa.gst06a` to about 6 uas over 1900-2100, the published-model residual
+/// (see `docs/validation.md`).
 /// Polar motion and the TIO locator are not applied.
 #[must_use]
 pub fn gast_iau2006(ut1_hi: f64, ut1_lo: f64, tt_hi: f64, tt_lo: f64) -> f64 {

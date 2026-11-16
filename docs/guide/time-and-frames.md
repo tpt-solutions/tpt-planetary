@@ -206,9 +206,7 @@ Accuracy against pyerfa over 1900-2100 (see [Validation](validation.md)):
 
 Not included: IAU 2000B; the polar-motion history term of s' (Eqs. 5.4 and
 5.12, bounded by the chapter at 0.4 mas per century); UT1 and polar motion,
-which are inputs (no IERS data is bundled); the complementary terms in GAST
-(the function exists, but `time::gast_iau2006` does not use it yet). The
-module needs `std`.
+which are inputs (no IERS data is bundled); The module needs `std`.
 
 ## Ephemerides
 
