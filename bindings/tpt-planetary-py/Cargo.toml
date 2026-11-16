@@ -24,6 +24,10 @@ extension-module = ["pyo3/extension-module"]
 tpt-planetary-core.workspace = true
 tpt-planetary-array.workspace = true
 tpt-planetary-astro.workspace = true
+# Declared as a direct path dependency only so that `maturin sdist` packages the
+# vendored MIT target-lexicon. The workspace [patch] makes pyo3-build-config use
+# the same copy. Not used by the Rust code.
+target-lexicon = { version = "0.13.6", path = "../../vendor/target-lexicon" }
 # MIT OR Apache-2.0. abi3-py39 gives one stable-ABI wheel per platform for
 # CPython 3.9 and newer.
 pyo3 = { version = "0.30.1", features = ["abi3-py39"] }

@@ -135,7 +135,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] UTC <-> TAI <-> TT with leap seconds, handling the UTC day-length discontinuity
 - [ ] UT1 and Earth Orientation Parameters (IERS Bulletin A/B/C04 parsing; bundled snapshot + user-supplied data) — PARTIAL: finals2000A parser with a column map from memory; no bundled snapshot; no UT1 scale type
 - [ ] TDB <-> TT (Fairhead & Bretagnon series, high precision) — PARTIAL: leading 3 terms in astro; full series open
-- [ ] Earth Rotation Angle, GMST, GAST — PARTIAL: ERA and GMST are validated against pyerfa. GAST (`time::gast_iau2006`) uses the classical equation of the equinoxes, so the complementary terms (up to 2.65 mas) are omitted and GAST is validated only to that bound. `cio::eo_complementary_terms` provides them, validated; wiring them into GAST is open.
+- [ ] Earth Rotation Angle, GMST, GAST — PARTIAL: ERA and GMST are validated against pyerfa. GAST (`time::gast_iau2006`) includes the complementary terms of the equation of the origins, and agrees with `erfa.gst06a` to the published-model residual of about 6 uas.
 - [ ] Validate against SOFA/ERFA published vectors and Astropy outputs (as test data only) — PARTIAL: checked against pyerfa 2.0.1.5 and astropy 8.0.2 (see docs/validation.md): leap steps, ERA, GMST, obliquity, ICRS-Galactic and WCS pass; TT-TDB differs by up to 14.9 us (3-term series); SPK not validated; nutation (IAU 2000A_R06) validated against pyerfa `nut06a`, see docs/validation.md; IAU 2006 precession validated against pyerfa (see docs/validation.md)
 
 ### Coordinate frames
@@ -234,7 +234,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [ ] xarray / Dask integration (backend entrypoint or adapter) and SunPy/Astropy interop notes
 - [ ] Async/GIL handling for S3 streaming — PARTIAL: GIL released for reads and reductions; no S3 streaming
 - [x] Type stubs (`.pyi`) and Python tests (pytest)
-- [ ] Wheels for manylinux/musllinux, macOS (x86_64, arm64), Windows via CI — PARTIAL: wheel and sdist workflow written in .github/workflows/wheels.yml, not yet run on a CI runner; the sdist may not package the sibling crates
+- [ ] Wheels for manylinux/musllinux, macOS (x86_64, arm64), Windows via CI — PARTIAL: wheel and sdist workflow written in .github/workflows/wheels.yml, not yet run on a CI runner. A local sdist packages the sibling crates and the vendored target-lexicon (a direct path dependency of the bindings crate) and builds offline when extracted. Publishing is out of scope.
 - [ ] Jupyter example notebook (the climate data-flow example with Matplotlib)
 
 ### Benchmarks & validation

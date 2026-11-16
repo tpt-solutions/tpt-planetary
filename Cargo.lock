@@ -595,6 +595,7 @@ version = "0.1.0"
 dependencies = [
  "numpy",
  "pyo3",
+ "target-lexicon",
  "tpt-planetary-array",
  "tpt-planetary-astro",
  "tpt-planetary-core",
