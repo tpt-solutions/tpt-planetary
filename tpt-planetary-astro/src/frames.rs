@@ -332,7 +332,7 @@ pub fn icrs_to_true_ecliptic(
 /// obliquity is evaluated at the epoch, the same frame as [`TrueEcliptic`]
 /// with the mean obliquity. At J2000.0 it equals [`MeanEcliptic`].
 #[must_use]
-pub fn icrs_to_ecliptic_at_epoch(
+pub fn icrs_to_ecliptic_epoch_obliquity(
     coord: SkyCoord<Icrs>,
     tt_hi: f64,
     tt_lo: f64,
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn epoch_ecliptic_at_j2000_matches_mean_ecliptic() {
         let c = SkyCoord::<Icrs>::from_degrees(47.3, -12.8);
-        let a = icrs_to_ecliptic_at_epoch(c, crate::time::J2000_JD, 0.0);
+        let a = icrs_to_ecliptic_epoch_obliquity(c, crate::time::J2000_JD, 0.0);
         let b = c.transform_to::<MeanEcliptic>();
         assert!(close_deg(a.lon_deg(), b.lon_deg(), 1e-9));
         assert!((a.lat_deg() - b.lat_deg()).abs() < 1e-9);
@@ -850,7 +850,7 @@ mod tests {
         // north ecliptic pole moves: the ICRS north pole's ecliptic latitude
         // changes by the same amount.
         let npole = SkyCoord::<Icrs>::from_degrees(0.0, 90.0);
-        let later = icrs_to_ecliptic_at_epoch(npole, crate::time::J2000_JD + 36_525.0, 0.0);
+        let later = icrs_to_ecliptic_epoch_obliquity(npole, crate::time::J2000_JD + 36_525.0, 0.0);
         let j2000 = npole.transform_to::<MeanEcliptic>();
         let shift_arcsec = (later.lat_deg() - j2000.lat_deg()).abs() * 3600.0;
         assert!(
