@@ -198,6 +198,233 @@ impl Ellipsoid {
     }
 }
 
+/// The geodesic between two points on the ellipsoid surface, from the
+/// inverse problem.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeodesicInverse {
+    /// Length of the geodesic, in metres.
+    pub distance: f64,
+    /// Azimuth at the first point, clockwise from north.
+    pub azimuth_start: Radians,
+    /// Azimuth at the second point, continuing along the geodesic.
+    pub azimuth_end: Radians,
+}
+
+/// The end point of a geodesic, from the direct problem.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeodesicDirect {
+    /// Longitude of the end point, east positive.
+    pub longitude: Radians,
+    /// Geodetic latitude of the end point, north positive.
+    pub latitude: Radians,
+    /// Azimuth at the end point, continuing along the geodesic.
+    pub azimuth_end: Radians,
+}
+
+/// Maximum iterations for Vincenty's iterations.
+const VINCENTY_MAX_ITERATIONS: usize = 200;
+
+/// Convergence tolerance for Vincenty's iterations, in radians (about
+/// 6 micrometres of arc on the equator).
+const VINCENTY_TOLERANCE: f64 = 1e-12;
+
+impl Ellipsoid {
+    /// Solves the geodesic inverse problem with Vincenty's formulae (1975).
+    ///
+    /// Points are given as longitude and geodetic latitude. The result is the
+    /// shortest geodesic on the ellipsoid surface. The formulae are accurate
+    /// to well under a millimetre for ordinary separations.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NonConvergence`] for nearly antipodal points, where Vincenty's
+    /// iteration may not converge.
+    pub fn geodesic_inverse(
+        self,
+        lon1: Radians,
+        lat1: Radians,
+        lon2: Radians,
+        lat2: Radians,
+    ) -> Result<GeodesicInverse, Error> {
+        let a = self.semi_major_axis;
+        let f = self.flattening();
+        let b = self.semi_minor_axis();
+        let big_l = lon2.0 - lon1.0;
+
+        let (sin_u1, cos_u1) = reduced_latitude(lat1.0, f);
+        let (sin_u2, cos_u2) = reduced_latitude(lat2.0, f);
+
+        let mut lambda = big_l;
+        let mut converged = false;
+        let mut sin_sigma = 0.0;
+        let mut cos_sigma = 1.0;
+        let mut sigma = 0.0;
+        let mut sin_alpha;
+        let mut cos2_alpha = 1.0;
+        let mut cos_2sigma_m = 0.0;
+        for _ in 0..VINCENTY_MAX_ITERATIONS {
+            let (sin_lambda, cos_lambda) = math::sin_cos(lambda);
+            let t1 = cos_u2 * sin_lambda;
+            let t2 = cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_lambda;
+            sin_sigma = math::sqrt(t1 * t1 + t2 * t2);
+            if sin_sigma == 0.0 {
+                // Coincident points.
+                return Ok(GeodesicInverse {
+                    distance: 0.0,
+                    azimuth_start: Radians(0.0),
+                    azimuth_end: Radians(0.0),
+                });
+            }
+            cos_sigma = sin_u1 * sin_u2 + cos_u1 * cos_u2 * cos_lambda;
+            sigma = math::atan2(sin_sigma, cos_sigma);
+            sin_alpha = cos_u1 * cos_u2 * sin_lambda / sin_sigma;
+            cos2_alpha = 1.0 - sin_alpha * sin_alpha;
+            cos_2sigma_m = if cos2_alpha != 0.0 {
+                cos_sigma - 2.0 * sin_u1 * sin_u2 / cos2_alpha
+            } else {
+                // Equatorial line: the midpoint is on the equator.
+                0.0
+            };
+            let c = f / 16.0 * cos2_alpha * (4.0 + f * (4.0 - 3.0 * cos2_alpha));
+            let previous = lambda;
+            lambda = big_l
+                + (1.0 - c)
+                    * f
+                    * sin_alpha
+                    * (sigma
+                        + c * sin_sigma
+                            * (cos_2sigma_m
+                                + c * cos_sigma * (-1.0 + 2.0 * cos_2sigma_m * cos_2sigma_m)));
+            if (lambda - previous).abs() < VINCENTY_TOLERANCE {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(Error::NonConvergence);
+        }
+
+        let (sin_lambda, cos_lambda) = math::sin_cos(lambda);
+        let u2 = cos2_alpha * (a * a - b * b) / (b * b);
+        let big_a = 1.0 + u2 / 16384.0 * (4096.0 + u2 * (-768.0 + u2 * (320.0 - 175.0 * u2)));
+        let big_b = u2 / 1024.0 * (256.0 + u2 * (-128.0 + u2 * (74.0 - 47.0 * u2)));
+        let delta_sigma = big_b
+            * sin_sigma
+            * (cos_2sigma_m
+                + big_b / 4.0
+                    * (cos_sigma * (-1.0 + 2.0 * cos_2sigma_m * cos_2sigma_m)
+                        - big_b / 6.0
+                            * cos_2sigma_m
+                            * (-3.0 + 4.0 * sin_sigma * sin_sigma)
+                            * (-3.0 + 4.0 * cos_2sigma_m * cos_2sigma_m)));
+        let distance = b * big_a * (sigma - delta_sigma);
+
+        let azimuth_start = math::atan2(
+            cos_u2 * sin_lambda,
+            cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_lambda,
+        );
+        let azimuth_end = math::atan2(
+            cos_u1 * sin_lambda,
+            -sin_u1 * cos_u2 + cos_u1 * sin_u2 * cos_lambda,
+        );
+        Ok(GeodesicInverse {
+            distance,
+            azimuth_start: Radians(azimuth_start),
+            azimuth_end: Radians(azimuth_end),
+        })
+    }
+
+    /// Solves the geodesic direct problem with Vincenty's formulae (1975): the
+    /// point reached from `(lon, lat)` after `distance` metres along the
+    /// geodesic that leaves at `azimuth` (clockwise from north).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NonConvergence`] if the series iteration does not converge.
+    pub fn geodesic_direct(
+        self,
+        lon: Radians,
+        lat: Radians,
+        azimuth: Radians,
+        distance: f64,
+    ) -> Result<GeodesicDirect, Error> {
+        let a = self.semi_major_axis;
+        let f = self.flattening();
+        let b = self.semi_minor_axis();
+
+        let (sin_u1, cos_u1) = reduced_latitude(lat.0, f);
+        let (sin_alpha1, cos_alpha1) = math::sin_cos(azimuth.0);
+        let sigma1 = math::atan2(sin_u1, cos_u1 * cos_alpha1);
+        let sin_alpha = cos_u1 * sin_alpha1;
+        let cos2_alpha = 1.0 - sin_alpha * sin_alpha;
+        let u2 = cos2_alpha * (a * a - b * b) / (b * b);
+        let big_a = 1.0 + u2 / 16384.0 * (4096.0 + u2 * (-768.0 + u2 * (320.0 - 175.0 * u2)));
+        let big_b = u2 / 1024.0 * (256.0 + u2 * (-128.0 + u2 * (74.0 - 47.0 * u2)));
+
+        let base = distance / (b * big_a);
+        let mut sigma = base;
+        let mut converged = false;
+        for _ in 0..VINCENTY_MAX_ITERATIONS {
+            let cos_2sigma_m = math::sin_cos(2.0 * sigma1 + sigma).1;
+            let (sin_sigma, cos_sigma) = math::sin_cos(sigma);
+            let delta_sigma = big_b
+                * sin_sigma
+                * (cos_2sigma_m
+                    + big_b / 4.0
+                        * (cos_sigma * (-1.0 + 2.0 * cos_2sigma_m * cos_2sigma_m)
+                            - big_b / 6.0
+                                * cos_2sigma_m
+                                * (-3.0 + 4.0 * sin_sigma * sin_sigma)
+                                * (-3.0 + 4.0 * cos_2sigma_m * cos_2sigma_m)));
+            let previous = sigma;
+            sigma = base + delta_sigma;
+            if (sigma - previous).abs() < VINCENTY_TOLERANCE {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(Error::NonConvergence);
+        }
+        let cos_2sigma_m = math::sin_cos(2.0 * sigma1 + sigma).1;
+        let (sin_sigma, cos_sigma) = math::sin_cos(sigma);
+
+        let x = sin_u1 * cos_sigma + cos_u1 * sin_sigma * cos_alpha1;
+        let y = sin_u1 * sin_sigma - cos_u1 * cos_sigma * cos_alpha1;
+        let lat2 = math::atan2(x, (1.0 - f) * math::sqrt(sin_alpha * sin_alpha + y * y));
+        let lambda = math::atan2(
+            sin_sigma * sin_alpha1,
+            cos_u1 * cos_sigma - sin_u1 * sin_sigma * cos_alpha1,
+        );
+        let c = f / 16.0 * cos2_alpha * (4.0 + f * (4.0 - 3.0 * cos2_alpha));
+        let big_l = lambda
+            - (1.0 - c)
+                * f
+                * sin_alpha
+                * (sigma
+                    + c * sin_sigma
+                        * (cos_2sigma_m
+                            + c * cos_sigma * (-1.0 + 2.0 * cos_2sigma_m * cos_2sigma_m)));
+        let azimuth_end = math::atan2(
+            sin_alpha,
+            -sin_u1 * sin_sigma + cos_u1 * cos_sigma * cos_alpha1,
+        );
+        Ok(GeodesicDirect {
+            longitude: Radians(lon.0 + big_l),
+            latitude: Radians(lat2),
+            azimuth_end: Radians(azimuth_end),
+        })
+    }
+}
+
+/// Sine and cosine of the reduced latitude `U`, where `tan U = (1 - f) tan lat`.
+fn reduced_latitude(lat: f64, f: f64) -> (f64, f64) {
+    let (sin_lat, cos_lat) = math::sin_cos(lat);
+    let (sin_u, cos_u) = ((1.0 - f) * sin_lat, cos_lat);
+    let norm = math::hypot(sin_u, cos_u);
+    (sin_u / norm, cos_u / norm)
+}
+
 /// Height above the ellipsoid of the point `(p, z)` at geodetic latitude
 /// given by `sin_b` and `cos_b`, with prime-vertical radius `n`.
 ///
@@ -290,5 +517,78 @@ mod tests {
         assert!((back.0 - lat.0).abs() < 1e-15);
         // Equator and poles are fixed points.
         assert_eq!(WGS84.geodetic_to_geocentric_latitude(Radians(0.0)).0, 0.0);
+    }
+
+    #[test]
+    fn vincenty_inverse_reference_pair() {
+        // Vincenty (1975) worked example: Flinders Peak to Buninyong on WGS84.
+        let (lon1, lat1) = (
+            Degrees(144.424_867_888_888_9),
+            Degrees(-37.951_033_416_666_67),
+        );
+        let (lon2, lat2) = (
+            Degrees(143.926_495_527_777_8),
+            Degrees(-37.652_821_138_888_89),
+        );
+        let g = WGS84
+            .geodesic_inverse(
+                lon1.to_radians(),
+                lat1.to_radians(),
+                lon2.to_radians(),
+                lat2.to_radians(),
+            )
+            .unwrap();
+        assert!(
+            (g.distance - 54_972.271).abs() < 1e-3,
+            "distance {}",
+            g.distance
+        );
+        // 306 deg 52' 05.37" and 127 deg 10' 25.07".
+        let dms = |d: f64, m: f64, s: f64| d + m / 60.0 + s / 3600.0;
+        // The paper's second azimuth points back towards the first point; the
+        // forward azimuth at the second point is 180 degrees more.
+        let start = g.azimuth_start.to_degrees().0.rem_euclid(360.0);
+        let back = (g.azimuth_end.to_degrees().0 + 180.0).rem_euclid(360.0);
+        assert!(
+            (start - dms(306.0, 52.0, 5.37)).abs() < 1e-5,
+            "start {start}"
+        );
+        assert!((back - dms(127.0, 10.0, 25.07)).abs() < 1e-5, "back {back}");
+    }
+
+    #[test]
+    fn vincenty_direct_inverts_inverse() {
+        let start = (Degrees(-122.4).to_radians(), Degrees(37.8).to_radians());
+        let end = (Degrees(151.2).to_radians(), Degrees(-33.9).to_radians());
+        let inv = WGS84
+            .geodesic_inverse(start.0, start.1, end.0, end.1)
+            .unwrap();
+        let dir = WGS84
+            .geodesic_direct(start.0, start.1, inv.azimuth_start, inv.distance)
+            .unwrap();
+        assert!((dir.latitude.0 - end.1.0).abs() < 1e-10);
+        let dlon = (dir.longitude.0 - end.0.0).rem_euclid(core::f64::consts::TAU);
+        assert!(dlon.min(core::f64::consts::TAU - dlon) < 1e-10);
+        assert!((dir.azimuth_end.0 - inv.azimuth_end.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vincenty_equator_and_coincident_points() {
+        // Along the equator the geodesic is an arc of the equatorial circle.
+        let g = WGS84
+            .geodesic_inverse(
+                Radians(0.0),
+                Radians(0.0),
+                Degrees(1.0).to_radians(),
+                Radians(0.0),
+            )
+            .unwrap();
+        let arc = WGS84.semi_major_axis() * Degrees(1.0).to_radians().0;
+        assert!((g.distance - arc).abs() < 1e-6, "{} vs {arc}", g.distance);
+        assert!((g.azimuth_start.to_degrees().0 - 90.0).abs() < 1e-9);
+        let same = WGS84
+            .geodesic_inverse(Radians(0.5), Radians(0.2), Radians(0.5), Radians(0.2))
+            .unwrap();
+        assert_eq!(same.distance, 0.0);
     }
 }
