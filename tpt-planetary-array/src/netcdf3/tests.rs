@@ -566,9 +566,41 @@ fn cf_rejects_unsupported_and_invalid_units() {
     assert!(TimeUnits::parse("days since 2000-01-01 25:00", standard).is_err());
     assert!(TimeUnits::parse("days since 2000-01-01 00:00Z", standard).is_err());
     assert!(TimeUnits::parse("days since 1582-10-10", standard).is_err());
-    assert!(Calendar::from_name("360_day").is_err());
-    assert!(Calendar::from_name("all_leap").is_err());
-    assert!(Calendar::from_name("julian").is_err());
+    assert!(Calendar::from_name("gregorian_plus").is_err());
+    assert!(Calendar::from_name("").is_err());
+}
+
+#[test]
+fn cf_days360_all_leap_and_julian_calendars() {
+    // 360_day: every month has 30 days, so 30 days after 2000-01-01 is 2000-02-01.
+    let d360 = TimeUnits::parse("days since 2000-01-01", Calendar::Days360).unwrap();
+    assert_eq!(d360.decode(29.0).unwrap(), dt(2000, 1, 30, 0, 0, 0.0));
+    assert_eq!(d360.decode(30.0).unwrap(), dt(2000, 2, 1, 0, 0, 0.0));
+    assert_eq!(d360.decode(31.0).unwrap(), dt(2000, 2, 2, 0, 0, 0.0));
+    assert_eq!(d360.decode(360.0).unwrap(), dt(2001, 1, 1, 0, 0, 0.0));
+    assert!(TimeUnits::parse("days since 2000-02-31", Calendar::Days360).is_err());
+    assert_eq!(Calendar::from_name("360_day").unwrap(), Calendar::Days360);
+
+    // all_leap: every February has 29 days.
+    let al = TimeUnits::parse("days since 2001-02-28", Calendar::AllLeap).unwrap();
+    assert_eq!(al.decode(1.0).unwrap(), dt(2001, 2, 29, 0, 0, 0.0));
+    assert_eq!(al.decode(2.0).unwrap(), dt(2001, 3, 1, 0, 0, 0.0));
+    assert_eq!(al.decode(366.0).unwrap(), dt(2002, 2, 28, 0, 0, 0.0));
+    assert_eq!(Calendar::from_name("366_day").unwrap(), Calendar::AllLeap);
+
+    // julian: 1900 is a leap year (no century rule).
+    let jul = TimeUnits::parse("days since 1900-02-28", Calendar::Julian).unwrap();
+    assert_eq!(jul.decode(1.0).unwrap(), dt(1900, 2, 29, 0, 0, 0.0));
+    assert_eq!(jul.decode(2.0).unwrap(), dt(1900, 3, 1, 0, 0, 0.0));
+    assert_eq!(Calendar::from_name("julian").unwrap(), Calendar::Julian);
+    // Round trips in every new calendar.
+    for cal in [Calendar::Days360, Calendar::AllLeap, Calendar::Julian] {
+        let u = TimeUnits::parse("days since 1999-12-01", cal).unwrap();
+        for k in [-400.0, -1.0, 0.0, 1.0, 500.0, 10_000.0] {
+            let time = u.decode(k).unwrap();
+            assert!((u.encode(time).unwrap() - k).abs() < 1e-9, "{cal:?} {k}");
+        }
+    }
 }
 
 #[test]

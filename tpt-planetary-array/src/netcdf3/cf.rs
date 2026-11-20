@@ -8,9 +8,9 @@
 //! Supported units: `days`/`day`/`d`, `hours`/`hour`/`hr`/`h`,
 //! `minutes`/`minute`/`min`, `seconds`/`second`/`sec`/`s`.
 //! Supported calendars: `standard` and `gregorian` (Julian before
-//! 1582-10-15, Gregorian after), `proleptic_gregorian`, and `noleap` and
-//! `365_day`. Calendars `360_day`, `all_leap`, `366_day` and `julian`, and
-//! units such as months or years (which are not fixed lengths in CF), are
+//! 1582-10-15, Gregorian after), `proleptic_gregorian`, `julian`, `noleap` and
+//! `365_day`, `all_leap` and `366_day`, and `360_day` (twelve 30-day months).
+//! Units such as months or years (which are not fixed lengths in CF) are
 //! rejected. Time zone suffixes are rejected. Reference dates must be on or
 //! after year -4700.
 //!
@@ -33,6 +33,12 @@ pub enum Calendar {
     ProlepticGregorian,
     /// Every year has 365 days (CF `noleap`/`365_day`).
     NoLeap,
+    /// Every year has 366 days (CF `all_leap`/`366_day`).
+    AllLeap,
+    /// Every year has twelve months of 30 days (CF `360_day`).
+    Days360,
+    /// Julian rules at all dates (CF `julian`).
+    Julian,
 }
 
 impl Calendar {
@@ -42,6 +48,9 @@ impl Calendar {
             "standard" | "gregorian" => Ok(Calendar::Standard),
             "proleptic_gregorian" => Ok(Calendar::ProlepticGregorian),
             "noleap" | "365_day" => Ok(Calendar::NoLeap),
+            "all_leap" | "366_day" => Ok(Calendar::AllLeap),
+            "360_day" => Ok(Calendar::Days360),
+            "julian" => Ok(Calendar::Julian),
             other => Err(Error::Unsupported(format!("CF calendar '{other}'"))),
         }
     }
@@ -281,6 +290,8 @@ const GREGORIAN_CUTOVER_JDN: i64 = 2_299_161;
 const MIN_YEAR: i64 = -4700;
 /// Days before the first day of each month in a non-leap year.
 const CUMULATIVE_DAYS: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+/// Days before the first day of each month in a leap year.
+const CUMULATIVE_DAYS_LEAP: [i64; 12] = [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335];
 
 fn gregorian_leap(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
@@ -288,7 +299,9 @@ fn gregorian_leap(year: i64) -> bool {
 
 fn is_leap(year: i64, calendar: Calendar) -> bool {
     match calendar {
-        Calendar::NoLeap => false,
+        Calendar::NoLeap | Calendar::Days360 => false,
+        Calendar::AllLeap => true,
+        Calendar::Julian => year.rem_euclid(4) == 0,
         Calendar::ProlepticGregorian => gregorian_leap(year),
         Calendar::Standard => {
             if year < 1582 {
@@ -301,6 +314,9 @@ fn is_leap(year: i64, calendar: Calendar) -> bool {
 }
 
 fn days_in_month(year: i64, month: u8, calendar: Calendar) -> u8 {
+    if calendar == Calendar::Days360 {
+        return 30;
+    }
     match month {
         2 if is_leap(year, calendar) => 29,
         2 => 28,
@@ -339,6 +355,9 @@ impl Calendar {
         let day = i64::from(dt.day);
         match self {
             Calendar::NoLeap => year * 365 + CUMULATIVE_DAYS[(month - 1) as usize] + day - 1,
+            Calendar::AllLeap => year * 366 + CUMULATIVE_DAYS_LEAP[(month - 1) as usize] + day - 1,
+            Calendar::Days360 => year * 360 + (month - 1) * 30 + day - 1,
+            Calendar::Julian => jdn_julian(year, month, day),
             Calendar::ProlepticGregorian => jdn_gregorian(year, month, day),
             Calendar::Standard => {
                 if (dt.year, dt.month, dt.day) >= (1582, 10, 15) {
@@ -363,6 +382,24 @@ impl Calendar {
                 let day = doy - CUMULATIVE_DAYS[month - 1] + 1;
                 Ok((year, month as u8, day as u8))
             }
+            Calendar::AllLeap => {
+                let year = count.div_euclid(366);
+                let doy = count.rem_euclid(366);
+                let mut month = 1usize;
+                while month < 12 && CUMULATIVE_DAYS_LEAP[month] <= doy {
+                    month += 1;
+                }
+                let day = doy - CUMULATIVE_DAYS_LEAP[month - 1] + 1;
+                Ok((year, month as u8, day as u8))
+            }
+            Calendar::Days360 => {
+                let year = count.div_euclid(360);
+                let doy = count.rem_euclid(360);
+                let month = doy / 30 + 1;
+                let day = doy % 30 + 1;
+                Ok((year, month as u8, day as u8))
+            }
+            Calendar::Julian => julian_from_jdn(count),
             Calendar::ProlepticGregorian => gregorian_from_jdn(count),
             Calendar::Standard => {
                 if count >= GREGORIAN_CUTOVER_JDN {
