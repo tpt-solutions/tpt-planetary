@@ -62,9 +62,9 @@ None of the four milestones in `todo.md` is met yet.
 
 ## Known gaps and naming issues
 
-- `icrs_to_ecliptic_at_epoch` rotates by the epoch obliquity but keeps the
-  J2000 equinox. It is not the mean ecliptic of date. A rename or a fix is
-  open.
+- `icrs_to_ecliptic_epoch_obliquity` (renamed from `icrs_to_ecliptic_at_epoch`)
+  rotates by the epoch obliquity but keeps the J2000 equinox. It is not the mean
+  ecliptic of date.
 - True ecliptic takes a caller-supplied obliquity.
 - IAU 2006 precession is available as `tpt_planetary_astro::precession` (angles
   and matrix, no frame bias). IAU 2000A_R06 nutation is available as

@@ -1,0 +1,13 @@
+# cargo-about configuration for the third-party notices file.
+# Generate with: scripts-free command in docs/notices.md
+# Accepted licences mirror the allow list in deny.toml.
+accepted = [
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "ISC",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
