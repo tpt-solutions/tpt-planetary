@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 use crate::cache::ChunkCache;
+use crate::codec::sharding::ShardingCodec;
 use crate::codec::{Pipeline, Registry};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
@@ -32,6 +33,10 @@ pub struct Array {
     meta: ArrayMetadata,
     grid: ChunkGrid,
     pipeline: Pipeline,
+    /// The sharding codec, when the chunk pipeline is exactly one
+    /// `sharding_indexed` codec. Reads then fetch only the index and the inner
+    /// chunks a selection needs.
+    shard: Option<ShardingCodec>,
     /// Decoded-chunk cache, present only when enabled (`std` feature: the
     /// mutex that makes the handle `Sync` needs `std`).
     #[cfg(feature = "std")]
@@ -58,12 +63,14 @@ impl Array {
     ) -> Result<Self> {
         let grid = meta.grid()?;
         let pipeline = meta.pipeline(registry)?;
+        let shard = shard_codec(&meta, registry)?;
         Ok(Self {
             store,
             path,
             meta,
             grid,
             pipeline,
+            shard,
             #[cfg(feature = "std")]
             chunk_cache: None,
         })
@@ -239,6 +246,71 @@ impl Array {
         Ok(())
     }
 
+    /// Reads the chunk at `coord` for a read whose pieces are `pieces`. For a
+    /// sharded array this fetches only the index and the inner chunks the
+    /// pieces touch; other arrays read the whole chunk.
+    fn read_task_chunk(
+        &self,
+        coord: &[u64],
+        pieces: &[crate::plan::DimPiece],
+    ) -> Result<Option<Vec<u8>>> {
+        match &self.shard {
+            None => self.read_chunk(coord),
+            Some(shard) => {
+                let selections: Vec<(u64, u64, u64)> = pieces
+                    .iter()
+                    .map(|p| (p.local_start, p.local_step, p.count))
+                    .collect();
+                self.read_shard_partial(shard, coord, &selections)
+            }
+        }
+    }
+
+    /// Partial read of one shard: range-reads the index, then only the inner
+    /// chunks in `selections`. Bypasses the chunk cache.
+    fn read_shard_partial(
+        &self,
+        shard: &ShardingCodec,
+        coord: &[u64],
+        selections: &[(u64, u64, u64)],
+    ) -> Result<Option<Vec<u8>>> {
+        self.grid.check_coord(coord)?;
+        let key = self.chunk_key(coord);
+        let Some(size) = self.store.size(&key)? else {
+            return Ok(None);
+        };
+        let il = shard.index_size() as u64;
+        if size < il {
+            return Err(Error::Codec(
+                "sharding: shard shorter than its index".into(),
+            ));
+        }
+        let index_bytes = self
+            .store
+            .get_range(&key, shard.index_offset(size)?, il)?
+            .ok_or_else(|| Error::NotFound(format!("shard index '{key}'")))?;
+        if index_bytes.len() as u64 != il {
+            return Err(Error::Codec(
+                "sharding: short read of the shard index".into(),
+            ));
+        }
+        let index = shard.parse_index_section(&index_bytes, size as usize)?;
+        let wanted = shard.inner_indices_touched(selections)?;
+        let store = &self.store;
+        let bytes = shard.decode_selected(&index, &wanted, |off, len| {
+            let v = store
+                .get_range(&key, off, len)?
+                .ok_or_else(|| Error::NotFound(format!("shard '{key}'")))?;
+            if v.len() as u64 != len {
+                return Err(Error::Codec(
+                    "sharding: short read of an inner chunk".into(),
+                ));
+            }
+            Ok(v)
+        })?;
+        Ok(Some(bytes))
+    }
+
     /// Reads a selection into a new byte buffer in C order. Returns the output
     /// shape (integer-indexed dimensions removed) and the bytes, which use the
     /// array's element type and byte order.
@@ -255,7 +327,7 @@ impl Array {
         let chunk_strides = c_strides(&self.meta.chunk_shape);
         let out_strides = c_strides(&out_shape);
         for task in plan.tasks() {
-            let Some(chunk) = self.read_chunk(&task.coord)? else {
+            let Some(chunk) = self.read_task_chunk(&task.coord, &task.pieces)? else {
                 continue; // already filled with the fill value
             };
             let geom = Geometry::new(&task, &resolved, &chunk_strides, &out_strides);
@@ -358,6 +430,25 @@ fn lock_cache(
         .map_err(|_| Error::Io("chunk cache lock poisoned".to_string()))
 }
 
+/// The sharding codec of `meta`, when its only codec is `sharding_indexed`.
+/// Any other pipeline (transpose, or bytes-to-bytes codecs around the shard)
+/// returns `None` and is read whole.
+fn shard_codec(meta: &ArrayMetadata, registry: &Registry) -> Result<Option<ShardingCodec>> {
+    match meta.codecs.as_slice() {
+        [spec] if spec.name == "sharding_indexed" => {
+            let fill = meta.fill_value.to_element_bytes(&meta.dtype)?;
+            Ok(Some(ShardingCodec::new(
+                &spec.config,
+                &meta.chunk_shape,
+                &meta.dtype,
+                &fill,
+                registry,
+            )?))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Offsets and counts for one chunk's contribution, expressed in elements.
 struct Geometry {
     chunk_base: usize,
@@ -448,6 +539,78 @@ fn copy_nd(
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::plan::DimPiece;
+    use crate::selection::ResolvedDim;
+
+    #[test]
+    fn chunk_geometry_saturates_instead_of_wrapping() {
+        // In range: offsets are plain products of the element strides.
+        let task = ChunkTask {
+            coord: vec![0, 0],
+            pieces: vec![
+                DimPiece {
+                    chunk: 0,
+                    local_start: 3,
+                    local_step: 2,
+                    count: 2,
+                    out_start: 1,
+                },
+                DimPiece {
+                    chunk: 0,
+                    local_start: 1,
+                    local_step: 1,
+                    count: 1,
+                    out_start: 0,
+                },
+            ],
+        };
+        let resolved = [
+            ResolvedDim {
+                start: 0,
+                step: 1,
+                count: 2,
+                kept: true,
+            },
+            ResolvedDim {
+                start: 0,
+                step: 1,
+                count: 1,
+                kept: true,
+            },
+        ];
+        let g = Geometry::new(&task, &resolved, &[4, 1], &[2, 1]);
+        assert_eq!(g.chunk_base, 3 * 4 + 1);
+        assert_eq!(g.chunk_steps, vec![2 * 4, 1]);
+        assert_eq!(g.sel_base, 2);
+        assert_eq!(g.sel_steps, vec![2, 1]);
+
+        // Out of range: an offset that does not fit in usize must saturate.
+        // It must not wrap to a small, plausible index, which would copy the
+        // wrong elements without any error.
+        let huge = ChunkTask {
+            coord: vec![0],
+            pieces: vec![DimPiece {
+                chunk: 0,
+                local_start: u64::MAX / 2,
+                local_step: 1,
+                count: 1,
+                out_start: 0,
+            }],
+        };
+        let g = Geometry::new(
+            &huge,
+            &[ResolvedDim {
+                start: 0,
+                step: 1,
+                count: 1,
+                kept: true,
+            }],
+            &[4],
+            &[1],
+        );
+        assert_eq!(g.chunk_base, usize::MAX);
+    }
+
     use crate::meta::{CodecSpec, ZarrFormat};
     use crate::selection::Slice;
     use crate::store::MemoryStore;
@@ -716,5 +879,149 @@ mod tests {
         assert!(Array::create(s.clone(), "a", meta).is_err());
         assert!(a.write_bytes(&[Selection::ALL], &[0u8; 3]).is_err());
         assert!(Array::open(s.clone(), "missing").is_err());
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod shard_read_tests {
+    use super::*;
+    use crate::meta::v3::parse_node;
+    use crate::selection::Slice;
+    use crate::store::MemoryStore;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Wraps a store and counts the bytes returned to the caller.
+    struct Counting {
+        inner: MemoryStore,
+        bytes_read: AtomicU64,
+    }
+
+    impl Store for Counting {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            let v = self.inner.get(key)?;
+            if let Some(b) = &v {
+                self.bytes_read.fetch_add(b.len() as u64, Ordering::SeqCst);
+            }
+            Ok(v)
+        }
+        fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Option<Vec<u8>>> {
+            let v = self.inner.get_range(key, start, len)?;
+            if let Some(b) = &v {
+                self.bytes_read.fetch_add(b.len() as u64, Ordering::SeqCst);
+            }
+            Ok(v)
+        }
+        fn size(&self, key: &str) -> Result<Option<u64>> {
+            self.inner.size(key)
+        }
+        fn set(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+        fn list(&self, prefix: &str) -> Result<Vec<String>> {
+            self.inner.list(prefix)
+        }
+    }
+
+    /// One 8x8 float64 shard of 2x2 inner chunks (16 inner chunks), with an
+    /// uncompressed inner chain and an index without a checksum.
+    const SHARD_FIXTURE: &str = r#"{
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [8, 8],
+        "data_type": "float64",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [8, 8]}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0.0,
+        "codecs": [
+            {"name": "sharding_indexed", "configuration": {
+                "chunk_shape": [2, 2],
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "index_codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "index_location": "end"
+            }}
+        ]
+    }"#;
+
+    fn make() -> (Arc<Counting>, Array) {
+        let store = Arc::new(Counting {
+            inner: MemoryStore::new(),
+            bytes_read: AtomicU64::new(0),
+        });
+        let NodeMetadata::Array(meta) = parse_node(SHARD_FIXTURE.as_bytes()).unwrap() else {
+            panic!("expected an array");
+        };
+        let array = Array::create(store.clone(), "a", meta).unwrap();
+        (store, array)
+    }
+
+    #[test]
+    fn partial_read_fetches_only_the_index_and_touched_inner_chunks() {
+        let (store, array) = make();
+        let data: Vec<f64> = (0..64).map(|i| i as f64 + 1.0).collect();
+        array.write_f64(&[], &data).unwrap();
+
+        store.bytes_read.store(0, Ordering::SeqCst);
+        // Rows 2..4 and columns 4..6: exactly one inner chunk.
+        let sel = [
+            Selection::Range(Slice::range(2, 4)),
+            Selection::Range(Slice::range(4, 6)),
+        ];
+        let got = array.read_f64(&sel).unwrap();
+        let expected: Vec<f64> = [(2, 4), (2, 5), (3, 4), (3, 5)]
+            .iter()
+            .map(|&(r, c)| data[r * 8 + c])
+            .collect();
+        assert_eq!(got, expected);
+        // Index: 16 entries of 16 bytes. Data: one 2x2 float64 inner chunk.
+        let fetched = store.bytes_read.load(Ordering::SeqCst);
+        assert_eq!(fetched, 16 * 16 + 4 * 8);
+        // The whole shard is 64 * 8 bytes of data plus the index.
+        assert!(fetched < 64 * 8 + 16 * 16);
+    }
+
+    #[test]
+    fn partial_read_matches_full_read_for_strided_and_missing_chunks() {
+        let (_store, array) = make();
+        // Write only part of the shard; the other inner chunks stay missing.
+        let block: Vec<f64> = (0..4).map(|i| 100.0 + i as f64).collect();
+        array
+            .write_f64(
+                &[
+                    Selection::Range(Slice::range(0, 2)),
+                    Selection::Range(Slice::range(0, 2)),
+                ],
+                &block,
+            )
+            .unwrap();
+        // A strided selection that touches the written chunk and a missing one.
+        let sel = [
+            Selection::Range(Slice {
+                start: Some(0),
+                stop: Some(8),
+                step: 3,
+            }),
+            Selection::Range(Slice::range(0, 8)),
+        ];
+        let got = array.read_f64(&sel).unwrap();
+        // Rows 0 and 3 and 6; column 0..8.
+        let (_, full) = array.read_bytes(&[]).unwrap();
+        let full: Vec<f64> = full
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        let mut expected = Vec::new();
+        for r in [0usize, 3, 6] {
+            for c in 0..8 {
+                expected.push(full[r * 8 + c]);
+            }
+        }
+        assert_eq!(got, expected);
+        assert_eq!(full[0], 100.0);
+        assert_eq!(full[1], 101.0);
+        assert_eq!(full[8], 102.0);
+        assert_eq!(full[2], 0.0); // missing chunk reads as the fill value
     }
 }
