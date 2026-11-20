@@ -25,6 +25,7 @@ mod source;
 pub mod broadcast;
 pub mod climatology;
 pub mod elementwise;
+pub mod groupby;
 pub mod reduce;
 pub mod spherical;
 pub mod window;
