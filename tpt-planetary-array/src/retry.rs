@@ -156,6 +156,10 @@ impl<S: Store> Store for RetryStore<S> {
         self.retrying(|| self.inner.get(key))
     }
 
+    fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Option<Vec<u8>>> {
+        self.retrying(|| self.inner.get_range(key, start, len))
+    }
+
     fn set(&self, key: &str, value: &[u8]) -> Result<()> {
         self.retrying(|| self.inner.set(key, value))
     }

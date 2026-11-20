@@ -18,6 +18,30 @@ pub trait Store: Send + Sync {
     /// Returns the bytes stored under `key`, or `None` if it does not exist.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
 
+    /// Returns `len` bytes of the value under `key`, starting at byte `start`,
+    /// or `None` if the key does not exist. A range that extends past the end
+    /// of the value is clipped.
+    ///
+    /// The default reads the whole value and slices it. Stores that can read
+    /// part of an object (such as [`HttpStore`](crate::store::HttpStore)) override it.
+    fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Option<Vec<u8>>> {
+        Ok(self.get(key)?.map(|value| {
+            let s = usize::try_from(start)
+                .unwrap_or(usize::MAX)
+                .min(value.len());
+            let e = usize::try_from(start.saturating_add(len))
+                .unwrap_or(usize::MAX)
+                .min(value.len());
+            value[s..e].to_vec()
+        }))
+    }
+
+    /// Length in bytes of the value under `key`, or `None` if the key does not
+    /// exist. The default reads the whole value; remote stores override it.
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        Ok(self.get(key)?.map(|v| v.len() as u64))
+    }
+
     /// Stores `value` under `key`, replacing any previous value.
     fn set(&self, key: &str, value: &[u8]) -> Result<()>;
 
@@ -65,10 +89,22 @@ pub fn join(path: &str, child: &str) -> String {
 }
 
 #[cfg(feature = "std")]
+pub use http::HttpStore;
+
+#[cfg(feature = "std")]
 pub use memory::MemoryStore;
 
 #[cfg(feature = "std")]
 pub use fs::FsStore;
+
+#[cfg(feature = "std")]
+mod http;
+
+#[cfg(feature = "std")]
+pub mod limit;
+
+#[cfg(feature = "std")]
+pub use limit::LimitedStore;
 
 #[cfg(feature = "std")]
 mod memory {
