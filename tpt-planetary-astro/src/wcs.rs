@@ -997,7 +997,10 @@ mod tests {
                 assert!(angle_diff_deg(ra, crval[0]) < 1e-9, "{proj:?} ra={ra}");
                 assert!((dec - crval[1]).abs() < 1e-9, "{proj:?} dec={dec}");
                 let (px, py) = w.world_to_pixel(crval[0], crval[1]).expect("ref");
-                assert!((px - 100.5).abs() < 1e-8 && (py - 50.5).abs() < 1e-8, "{proj:?}");
+                assert!(
+                    (px - 100.5).abs() < 1e-8 && (py - 50.5).abs() < 1e-8,
+                    "{proj:?}"
+                );
             }
         }
     }
@@ -1048,7 +1051,10 @@ mod tests {
         // ARC covers the whole sphere: R = 180 deg is the antipode of CRVAL.
         let w = Wcs::new(params(Projection::Arc, [0.0, 0.0], identity_cd(1.0))).expect("wcs");
         let (ra, dec) = w.pixel_to_world(100.5 + 180.0, 50.5).expect("edge");
-        assert!((ra - 180.0).abs() < 1e-8 && dec.abs() < 1e-8, "({ra},{dec})");
+        assert!(
+            (ra - 180.0).abs() < 1e-8 && dec.abs() < 1e-8,
+            "({ra},{dec})"
+        );
         assert!(w.pixel_to_world(100.5 + 181.0, 50.5).is_none());
     }
 
@@ -1100,7 +1106,10 @@ mod tests {
         // offset equal to the sky offset.
         let w = Wcs::new(params(Projection::Car, [0.0, 0.0], identity_cd(1.0))).expect("wcs");
         let (ra, dec) = w.pixel_to_world(100.5 + 30.0, 50.5 + 20.0).expect("domain");
-        assert!((ra - 30.0).abs() < 1e-10 && (dec - 20.0).abs() < 1e-10, "({ra},{dec})");
+        assert!(
+            (ra - 30.0).abs() < 1e-10 && (dec - 20.0).abs() < 1e-10,
+            "({ra},{dec})"
+        );
         assert!(w.pixel_to_world(100.5, 50.5 + 90.5).is_none());
     }
 
@@ -1110,7 +1119,10 @@ mod tests {
         let w = Wcs::new(params(Projection::Mol, [0.0, 0.0], identity_cd(1.0))).expect("wcs");
         let edge = 2.0 * SQRT_2 * R2D;
         let (ra, dec) = w.pixel_to_world(100.5 + edge, 50.5).expect("edge");
-        assert!((ra - 180.0).abs() < 1e-8 && dec.abs() < 1e-8, "({ra},{dec})");
+        assert!(
+            (ra - 180.0).abs() < 1e-8 && dec.abs() < 1e-8,
+            "({ra},{dec})"
+        );
         assert!(w.pixel_to_world(100.5 + edge + 0.5, 50.5).is_none());
     }
 
@@ -1128,9 +1140,29 @@ mod tests {
     fn hpx_equatorial_boundary_is_sin_theta_two_thirds() {
         // HPX: the equatorial zone ends at sin(theta) = 2/3, where y = pi/4.
         let w = Wcs::new(params(Projection::Hpx, [0.0, 0.0], identity_cd(1.0))).expect("wcs");
-        let (ra, dec) = w.pixel_to_world(100.5 + 0.0, 50.5 + FRAC_PI_4 * R2D).expect("edge");
+        let (ra, dec) = w
+            .pixel_to_world(100.5 + 0.0, 50.5 + FRAC_PI_4 * R2D)
+            .expect("edge");
         assert!(ra.abs() < 1e-9 || (ra - 360.0).abs() < 1e-9, "ra={ra}");
-        assert!((dec - (2.0_f64 / 3.0).asin().to_degrees()).abs() < 1e-9, "dec={dec}");
+        assert!(
+            (dec - (2.0_f64 / 3.0).asin().to_degrees()).abs() < 1e-9,
+            "dec={dec}"
+        );
+    }
+
+    #[test]
+    fn right_ascension_folds_rounding_at_360_to_zero() {
+        // A pixel a hair west of the reference point gives a right ascension of
+        // -1e-15 degrees. rem_euclid rounds 360 - 1e-15 to exactly 360.0, which
+        // must come back as 0.0 so the range stays [0, 360).
+        let w = Wcs::new(WcsParams {
+            crpix: [0.0, 0.0],
+            ..params(Projection::Tan, [0.0, 0.0], identity_cd(1.0))
+        })
+        .expect("wcs");
+        let (ra, dec) = w.pixel_to_world(-1e-15, 0.0).expect("in range");
+        assert!((0.0..360.0).contains(&ra), "ra={ra}");
+        assert!(dec.abs() < 1e-12, "dec={dec}");
     }
 
     #[test]
@@ -1387,10 +1419,18 @@ B_2_0 = -1.5E-6\nB_1_1 = 2.5E-6\nB_0_2 = 4.0E-7\nA_3_0 = 1.0E-8\nB_0_3 = -5.0E-9
         let extra = "A_ORDER = 2\nB_ORDER = 2\nA_2_0 = 4.0E-6\nA_1_1 = 2.0E-6\nB_0_2 = -3.0E-6\n\
 B_1_1 = 1.0E-6\n";
         let w = Wcs::from_header(&sip_header(extra)).expect("sip");
-        for (x, y) in [(512.5, 480.0), (100.0, 50.0), (900.0, 800.0), (512.5 + 40.0, 480.0 - 25.0)] {
+        for (x, y) in [
+            (512.5, 480.0),
+            (100.0, 50.0),
+            (900.0, 800.0),
+            (512.5 + 40.0, 480.0 - 25.0),
+        ] {
             let (ra, dec) = w.pixel_to_world(x, y).expect("domain");
             let (bx, by) = w.world_to_pixel(ra, dec).expect("inverse");
-            assert!((bx - x).abs() < 1e-8 && (by - y).abs() < 1e-8, "({x},{y}) -> ({bx},{by})");
+            assert!(
+                (bx - x).abs() < 1e-8 && (by - y).abs() < 1e-8,
+                "({x},{y}) -> ({bx},{by})"
+            );
         }
     }
 
@@ -1409,7 +1449,10 @@ AP_2_0 = {}\nBP_0_2 = {}\n",
             let (x, y) = (512.5 + dx, 480.0 + dy);
             let (ra, dec) = w.pixel_to_world(x, y).expect("domain");
             let (bx, by) = w.world_to_pixel(ra, dec).expect("inverse");
-            assert!((bx - x).abs() < 1e-3 && (by - y).abs() < 1e-3, "({bx},{by}) vs ({x},{y})");
+            assert!(
+                (bx - x).abs() < 1e-3 && (by - y).abs() < 1e-3,
+                "({bx},{by}) vs ({x},{y})"
+            );
         }
     }
 

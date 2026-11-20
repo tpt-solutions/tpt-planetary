@@ -46,6 +46,7 @@ fn wcs_tan_pixel_to_world_10k(bencher: divan::Bencher) {
         projection: Projection::Tan,
         lonpole: None,
         latpole: None,
+        pv2: [None, None],
     })
     .expect("valid WCS");
     bencher.bench_local(|| {
