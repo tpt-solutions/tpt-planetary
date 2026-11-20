@@ -30,6 +30,7 @@
 #![forbid(unsafe_code)]
 
 pub mod eop;
+pub mod fits;
 #[cfg(all(test, not(feature = "std")))]
 extern crate alloc;
 
@@ -47,6 +48,8 @@ mod cio_data;
 
 #[cfg(feature = "std")]
 pub mod frames;
+#[cfg(feature = "std")]
+pub mod orbit;
 #[cfg(feature = "std")]
 pub mod time;
 #[cfg(feature = "std")]

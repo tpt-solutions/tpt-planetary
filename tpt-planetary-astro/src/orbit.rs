@@ -147,9 +147,9 @@ impl fmt::Display for OrbitError {
                 f.write_str("TLE lines 1 and 2 have different satellite numbers")
             }
             OrbitError::MeanMotionNonPositive => f.write_str("mean motion is not positive"),
-            OrbitError::DeepSpace => {
-                f.write_str("orbital period is 225 minutes or more; deep-space SGP4 is not implemented")
-            }
+            OrbitError::DeepSpace => f.write_str(
+                "orbital period is 225 minutes or more; deep-space SGP4 is not implemented",
+            ),
             OrbitError::EccentricityOutOfRange => {
                 f.write_str("SGP4 eccentricity is outside the range 0 to 1")
             }
@@ -323,7 +323,7 @@ impl Keplerian {
     pub fn to_state(&self) -> Result<StateVector, OrbitError> {
         let a = self.semi_major_axis_km;
         let e = self.eccentricity;
-        if !(a > 0.0) || !(0.0..1.0).contains(&e) {
+        if a.is_nan() || a <= 0.0 || !(0.0..1.0).contains(&e) {
             return Err(OrbitError::InvalidElements);
         }
         let nu = self.true_anomaly_rad()?;
@@ -381,12 +381,12 @@ impl Keplerian {
         let v_vec = state.velocity_km_s;
         let r = norm(r_vec);
         let v2 = dot(v_vec, v_vec);
-        if !(r > 0.0) {
+        if r.is_nan() || r <= 0.0 {
             return Err(OrbitError::DegenerateState);
         }
         let h_vec = cross(r_vec, v_vec);
         let h = norm(h_vec);
-        if !(h > 0.0) {
+        if h.is_nan() || h <= 0.0 {
             return Err(OrbitError::DegenerateState);
         }
         let h_hat = [h_vec[0] / h, h_vec[1] / h, h_vec[2] / h];
@@ -404,7 +404,7 @@ impl Keplerian {
             return Err(OrbitError::InvalidElements);
         }
         let energy = 0.5 * v2 - mu / r;
-        if !(energy < 0.0) {
+        if energy.is_nan() || energy >= 0.0 {
             return Err(OrbitError::InvalidElements);
         }
         let a = -mu / (2.0 * energy);
@@ -729,7 +729,7 @@ impl Sgp4 {
 
         // Converts TLE units: rev/day to rad/min, degrees to radians.
         let no_kozai = tle.mean_motion_rev_day / (1440.0 / TAU);
-        if !(no_kozai > 0.0) {
+        if no_kozai.is_nan() || no_kozai <= 0.0 {
             return Err(OrbitError::MeanMotionNonPositive);
         }
         let ecco = tle.eccentricity;
@@ -750,8 +750,7 @@ impl Sgp4 {
         let ak = (xke / no_kozai).powf(x2o3);
         let d1 = 0.75 * j2 * (3.0 * cosio2 - 1.0) / (rteosq * omeosq);
         let mut del = d1 / (ak * ak);
-        let adel = ak
-            * (1.0 - del * del - del * (1.0 / 3.0 + 134.0 * del * del / 81.0));
+        let adel = ak * (1.0 - del * del - del * (1.0 / 3.0 + 134.0 * del * del / 81.0));
         del = d1 / (adel * adel);
         let no_unkozai = no_kozai / (1.0 + del);
 
@@ -816,11 +815,7 @@ impl Sgp4 {
                             * x1mth2
                             * (2.0 * etasq - eeta * (1.0 + etasq))
                             * (2.0 * argpo).cos()));
-        let cc5 = 2.0
-            * coef1
-            * ao
-            * omeosq
-            * (1.0 + 2.75 * (etasq + eeta) + eeta * etasq);
+        let cc5 = 2.0 * coef1 * ao * omeosq * (1.0 + 2.75 * (etasq + eeta) + eeta * etasq);
         let cosio4 = cosio2 * cosio2;
         let temp1 = 1.5 * j2 * pinvsq * no_unkozai;
         let temp2 = 0.5 * temp1 * j2 * pinvsq;
@@ -833,8 +828,7 @@ impl Sgp4 {
             + temp3 * (3.0 - 36.0 * cosio2 + 49.0 * cosio4);
         let xhdot1 = -temp1 * cosio;
         let nodedot = xhdot1
-            + (0.5 * temp2 * (4.0 - 19.0 * cosio2) + 2.0 * temp3 * (3.0 - 7.0 * cosio2))
-                * cosio;
+            + (0.5 * temp2 * (4.0 - 19.0 * cosio2) + 2.0 * temp3 * (3.0 - 7.0 * cosio2)) * cosio;
         let omgcof = bstar * cc3 * argpo.cos();
         let mut xmcof = 0.0;
         if ecco > 1.0e-4 {
@@ -854,7 +848,8 @@ impl Sgp4 {
         let x7thm1 = 7.0 * cosio2 - 1.0;
 
         // Higher-order drag terms (used only when not in simplified mode).
-        let (mut d2, mut d3, mut d4, mut t3cof, mut t4cof, mut t5cof) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut d2, mut d3, mut d4, mut t3cof, mut t4cof, mut t5cof) =
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         if !isimp {
             let cc1sq = cc1 * cc1;
             d2 = 4.0 * ao * tsi * cc1sq;
@@ -864,10 +859,7 @@ impl Sgp4 {
             t3cof = d2 + 2.0 * cc1sq;
             t4cof = 0.25 * (3.0 * d3 + cc1 * (12.0 * d2 + 10.0 * cc1sq));
             t5cof = 0.2
-                * (3.0 * d4
-                    + 12.0 * cc1 * d3
-                    + 6.0 * d2 * d2
-                    + 15.0 * cc1sq * (2.0 * d2 + cc1sq));
+                * (3.0 * d4 + 12.0 * cc1 * d3 + 6.0 * d2 * d2 + 15.0 * cc1sq * (2.0 * d2 + cc1sq));
         }
 
         Ok(Sgp4 {
@@ -964,7 +956,7 @@ impl Sgp4 {
         let am = (self.xke / nm0).powf(x2o3) * tempa * tempa;
         let nm = self.xke / am.powf(1.5);
         em -= tempe;
-        if em >= 1.0 || em < -0.001 {
+        if !(-0.001..1.0).contains(&em) {
             return Err(OrbitError::EccentricityOutOfRange);
         }
         if em < 1.0e-6 {
@@ -999,7 +991,7 @@ impl Sgp4 {
         // terms below, as in the reference code.
         let u = (xl - nodep).rem_euclid(TAU);
         let mut eo1 = u;
-        let mut tem5 = 9999.9;
+        let mut tem5: f64 = 9999.9;
         let mut ktr = 1;
         let mut sineo1 = 0.0;
         let mut coseo1 = 0.0;
@@ -1039,8 +1031,7 @@ impl Sgp4 {
 
         // Short-period periodics.
         let con41 = self.con41;
-        let mrt = rl * (1.0 - 1.5 * temp2 * betal * con41)
-            + 0.5 * temp1 * self.x1mth2 * cos2u;
+        let mrt = rl * (1.0 - 1.5 * temp2 * betal * con41) + 0.5 * temp1 * self.x1mth2 * cos2u;
         su -= 0.25 * temp2 * self.x7thm1 * sin2u;
         let xnode = nodep + 1.5 * temp2 * cosip * sin2u;
         let xinc = xincp + 1.5 * temp2 * cosip * sinip * cos2u;
@@ -1103,8 +1094,10 @@ mod tests {
 
     /// Vanguard 1 element set, first case of Vallado's SGP4 verification file
     /// (`SGP4-VER.TLE` in the Python `sgp4` package).
-    const VANGUARD_L1: &str = "1 00005U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753";
-    const VANGUARD_L2: &str = "2 00005  34.2682 348.7242 1859667 331.7664  19.3264 10.82419157413667";
+    const VANGUARD_L1: &str =
+        "1 00005U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753";
+    const VANGUARD_L2: &str =
+        "2 00005  34.2682 348.7242 1859667 331.7664  19.3264 10.82419157413667";
 
     /// Reference TEME states from Vallado's `tcppver.out` (WGS-72, opsmode i),
     /// for minutes since epoch 0, 360 and 720: position km, velocity km/s.
@@ -1158,7 +1151,10 @@ mod tests {
                 let m = TAU * f64::from(k) / 64.0 + 0.001;
                 let e_anom = solve_kepler(m, e).unwrap();
                 let residual = e_anom - e * e_anom.sin() - m.rem_euclid(TAU);
-                assert!(residual.abs() < 1e-13, "residual {residual} at e={e}, M={m}");
+                assert!(
+                    residual.abs() < 1e-13,
+                    "residual {residual} at e={e}, M={m}"
+                );
             }
         }
     }
@@ -1280,7 +1276,12 @@ mod tests {
             let s2 = el2.to_state().unwrap();
             for k in 0..3 {
                 assert_close(s.position_km[k], s2.position_km[k], 1e-6, "r round trip");
-                assert_close(s.velocity_km_s[k], s2.velocity_km_s[k], 1e-9, "v round trip");
+                assert_close(
+                    s.velocity_km_s[k],
+                    s2.velocity_km_s[k],
+                    1e-9,
+                    "v round trip",
+                );
             }
         }
     }
@@ -1303,7 +1304,12 @@ mod tests {
         let back = el.to_state().unwrap();
         for k in 0..3 {
             assert_close(s.position_km[k], back.position_km[k], 1e-8, "circ eq r");
-            assert_close(s.velocity_km_s[k], back.velocity_km_s[k], 1e-11, "circ eq v");
+            assert_close(
+                s.velocity_km_s[k],
+                back.velocity_km_s[k],
+                1e-11,
+                "circ eq v",
+            );
         }
         // Elliptic equatorial orbit, retrograde.
         let s = Keplerian {
@@ -1400,9 +1406,24 @@ mod tests {
 
     #[test]
     fn implied_exponent_fields() {
-        assert_close(parse_implied_exponent(" 28098-4").unwrap(), 2.8098e-5, 1e-18, "+");
-        assert_close(parse_implied_exponent("-11606-4").unwrap(), -1.1606e-5, 1e-18, "-");
-        assert_close(parse_implied_exponent(" 00000-0").unwrap(), 0.0, 0.0, "zero");
+        assert_close(
+            parse_implied_exponent(" 28098-4").unwrap(),
+            2.8098e-5,
+            1e-18,
+            "+",
+        );
+        assert_close(
+            parse_implied_exponent("-11606-4").unwrap(),
+            -1.1606e-5,
+            1e-18,
+            "-",
+        );
+        assert_close(
+            parse_implied_exponent(" 00000-0").unwrap(),
+            0.0,
+            0.0,
+            "zero",
+        );
         assert!(parse_implied_exponent("28098-4").is_none());
     }
 
@@ -1412,7 +1433,12 @@ mod tests {
         assert_close(jd_jan_first(2000), 2_451_544.5, 0.0, "2000 Jan 1");
         let tle = Tle::parse(VANGUARD_L1, VANGUARD_L2).unwrap();
         // 2000 is the year, day 179.78495062 is 28 June 2000 at about 18:50 UT.
-        assert_close(tle.epoch_jd().to_f64(), 2_451_544.5 + 178.784_950_62, 1e-8, "epoch JD");
+        assert_close(
+            tle.epoch_jd().to_f64(),
+            2_451_544.5 + 178.784_950_62,
+            1e-8,
+            "epoch JD",
+        );
     }
 
     #[test]
@@ -1450,11 +1476,14 @@ mod tests {
     #[test]
     fn decayed_orbit_returns_error() {
         // Mean motion 15.9 rev/day with e = 0.2: perigee is inside the Earth.
+        // At epoch the mean anomaly is 260 degrees, so the satellite is above
+        // the surface; it reaches perigee (mean anomaly 360 degrees) after
+        // about 100 / (15.9 * 360 / 1440) = 25.2 minutes.
         let l1 = "1 99999U 99999A   20001.00000000  .00000000  00000-0  00000-0 0  9990";
         let l2 = "2 99999  51.6000 100.0000 2000000 100.0000 260.0000 15.90000000    00";
         let sat = Sgp4::from_tle_lines(&with_checksum(l1), &with_checksum(l2)).unwrap();
-        assert_eq!(sat.propagate(0.0), Err(OrbitError::Decayed));
-        assert_eq!(sat.propagate(120.0), Err(OrbitError::Decayed));
+        assert!(sat.propagate(0.0).is_ok());
+        assert_eq!(sat.propagate(25.2), Err(OrbitError::Decayed));
     }
 
     #[test]
@@ -1464,7 +1493,10 @@ mod tests {
             Err(OrbitError::InvalidTle { line: 1 })
         );
         assert_eq!(
-            Tle::parse(VANGUARD_L1, "3 not a line 2 at all, long enough to pass the length check........................"),
+            Tle::parse(
+                VANGUARD_L1,
+                "3 not a line 2 at all, long enough to pass the length check........................"
+            ),
             Err(OrbitError::InvalidTle { line: 2 })
         );
     }

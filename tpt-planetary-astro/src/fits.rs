@@ -273,11 +273,18 @@ impl<'a> Header<'a> {
             }
             pos += BLOCK;
             if found {
-                return Ok((Self { bytes: &bytes[..pos] }, pos));
+                return Ok((
+                    Self {
+                        bytes: &bytes[..pos],
+                    },
+                    pos,
+                ));
             }
         }
         if bytes.len() < BLOCK {
-            Err(FitsError::Truncated("header is shorter than one 2880-byte block"))
+            Err(FitsError::Truncated(
+                "header is shorter than one 2880-byte block",
+            ))
         } else {
             Err(FitsError::Truncated("no END card before end of input"))
         }
@@ -482,9 +489,19 @@ impl<'a> Hdu<'a> {
     /// Scaling is done in `f64`, so large 64-bit integers can lose precision.
     pub fn values(&self) -> impl ExactSizeIterator<Item = f64> + 'a {
         let (bitpix, bscale, bzero) = (self.bitpix, self.bscale, self.bzero);
-        self.data
-            .chunks_exact(bitpix.bytes())
-            .map(move |c| bzero + bscale * decode(bitpix, c))
+        // The conventional unsigned 64-bit encoding (BZERO = 2^63) is mapped
+        // by flipping the sign bit, so that the one rounding is the conversion
+        // to f64. Going through a signed f64 first loses small values.
+        let unsigned64 =
+            bitpix == Bitpix::I64 && bscale == 1.0 && bzero == 9_223_372_036_854_775_808.0;
+        self.data.chunks_exact(bitpix.bytes()).map(move |c| {
+            if unsigned64 {
+                return c
+                    .first_chunk::<8>()
+                    .map_or(f64::NAN, |a| (u64::from_be_bytes(*a) ^ (1 << 63)) as f64);
+            }
+            bzero + bscale * decode(bitpix, c)
+        })
     }
 
     /// Writes the physical pixel values into `out`.
@@ -528,24 +545,22 @@ impl<'a> Hdu<'a> {
         let d = self.data;
         let bz = self.bzero;
         Ok(match (self.bitpix, bz) {
-            (Bitpix::U8, z) if z == 0.0 => ImageData::U8(d.to_vec()),
-            (Bitpix::U8, z) if z == -128.0 => {
-                ImageData::I8(d.iter().map(|&b| (b ^ 0x80) as i8).collect())
-            }
-            (Bitpix::I16, z) if z == 0.0 => ImageData::I16(collect_be(d, i16::from_be_bytes)),
-            (Bitpix::I16, z) if z == 32768.0 => {
+            (Bitpix::U8, 0.0) => ImageData::U8(d.to_vec()),
+            (Bitpix::U8, -128.0) => ImageData::I8(d.iter().map(|&b| (b ^ 0x80) as i8).collect()),
+            (Bitpix::I16, 0.0) => ImageData::I16(collect_be(d, i16::from_be_bytes)),
+            (Bitpix::I16, 32768.0) => {
                 ImageData::U16(collect_be(d, |a| u16::from_be_bytes(a) ^ 0x8000))
             }
-            (Bitpix::I32, z) if z == 0.0 => ImageData::I32(collect_be(d, i32::from_be_bytes)),
-            (Bitpix::I32, z) if z == 2_147_483_648.0 => {
+            (Bitpix::I32, 0.0) => ImageData::I32(collect_be(d, i32::from_be_bytes)),
+            (Bitpix::I32, 2_147_483_648.0) => {
                 ImageData::U32(collect_be(d, |a| u32::from_be_bytes(a) ^ 0x8000_0000))
             }
-            (Bitpix::I64, z) if z == 0.0 => ImageData::I64(collect_be(d, i64::from_be_bytes)),
-            (Bitpix::I64, z) if z == 9_223_372_036_854_775_808.0 => {
+            (Bitpix::I64, 0.0) => ImageData::I64(collect_be(d, i64::from_be_bytes)),
+            (Bitpix::I64, 9_223_372_036_854_775_808.0) => {
                 ImageData::U64(collect_be(d, |a| u64::from_be_bytes(a) ^ (1 << 63)))
             }
-            (Bitpix::F32, z) if z == 0.0 => ImageData::F32(collect_be(d, f32::from_be_bytes)),
-            (Bitpix::F64, z) if z == 0.0 => ImageData::F64(collect_be(d, f64::from_be_bytes)),
+            (Bitpix::F32, 0.0) => ImageData::F32(collect_be(d, f32::from_be_bytes)),
+            (Bitpix::F64, 0.0) => ImageData::F64(collect_be(d, f64::from_be_bytes)),
             _ => {
                 return Err(FitsError::Unsupported(
                     "non-conventional BZERO; use values() for scaled data",
@@ -671,7 +686,9 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
         }
     } else {
         if first_card.keyword != "XTENSION" {
-            return Err(FitsError::InvalidHeader("extension does not start with XTENSION"));
+            return Err(FitsError::InvalidHeader(
+                "extension does not start with XTENSION",
+            ));
         }
         match first_card.value {
             Some(Value::Text(t)) if t.trim_end() == "IMAGE" => {}
@@ -688,7 +705,9 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
         .get("BITPIX")
         .and_then(|v| v.as_i64())
         .and_then(Bitpix::from_code)
-        .ok_or(FitsError::InvalidHeader("BITPIX missing or not 8, 16, 32, 64, -32, -64"))?;
+        .ok_or(FitsError::InvalidHeader(
+            "BITPIX missing or not 8, 16, 32, 64, -32, -64",
+        ))?;
     let naxis = header
         .get("NAXIS")
         .and_then(|v| v.as_i64())
@@ -749,10 +768,13 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
 fn optional_count(header: &Header<'_>, keyword: &str, default: usize) -> Result<usize> {
     match header.get(keyword) {
         None => Ok(default),
-        Some(v) => v
-            .as_i64()
-            .and_then(|i| usize::try_from(i).ok())
-            .ok_or(FitsError::InvalidHeader("PCOUNT/GCOUNT is not a non-negative integer")),
+        Some(v) => {
+            v.as_i64()
+                .and_then(|i| usize::try_from(i).ok())
+                .ok_or(FitsError::InvalidHeader(
+                    "PCOUNT/GCOUNT is not a non-negative integer",
+                ))
+        }
     }
 }
 
@@ -762,7 +784,9 @@ fn optional_f64(header: &Header<'_>, keyword: &str, default: f64) -> Result<f64>
         Some(v) => v
             .as_f64()
             .filter(|f| f.is_finite())
-            .ok_or(FitsError::InvalidHeader("BSCALE/BZERO is not a finite number")),
+            .ok_or(FitsError::InvalidHeader(
+                "BSCALE/BZERO is not a finite number",
+            )),
     }
 }
 
@@ -924,7 +948,11 @@ impl ImageData {
 /// Returns an error if `dims` does not match the data length, a keyword is
 /// invalid or reserved, or a card cannot be formatted in 80 columns.
 #[cfg(feature = "std")]
-pub fn write_primary(header: &[WriteCard<'_>], data: Pixels<'_>, dims: &[usize]) -> Result<Vec<u8>> {
+pub fn write_primary(
+    header: &[WriteCard<'_>],
+    data: Pixels<'_>,
+    dims: &[usize],
+) -> Result<Vec<u8>> {
     let (bitpix, scaling, bytes) = encode_native(data);
     assemble(header, bitpix, scaling, dims, bytes)
 }
@@ -950,7 +978,9 @@ pub fn write_primary_f64(
     data: &[f64],
 ) -> Result<Vec<u8>> {
     if matches!(bitpix, Bitpix::F32 | Bitpix::F64) && scaling != Scaling::NONE {
-        return Err(FitsError::Unsupported("scaling applies only to integer BITPIX"));
+        return Err(FitsError::Unsupported(
+            "scaling applies only to integer BITPIX",
+        ));
     }
     let mut bytes = Vec::with_capacity(data.len() * bitpix.bytes());
     for &v in data {
@@ -987,7 +1017,9 @@ fn encode_native(data: Pixels<'_>) -> (Bitpix, Scaling, Vec<u8>) {
         Pixels::U32(s) => (
             Bitpix::I32,
             unsigned(2_147_483_648.0),
-            s.iter().flat_map(|&v| (v ^ 0x8000_0000).to_be_bytes()).collect(),
+            s.iter()
+                .flat_map(|&v| (v ^ 0x8000_0000).to_be_bytes())
+                .collect(),
         ),
         Pixels::I64(s) => (
             Bitpix::I64,
@@ -997,7 +1029,9 @@ fn encode_native(data: Pixels<'_>) -> (Bitpix, Scaling, Vec<u8>) {
         Pixels::U64(s) => (
             Bitpix::I64,
             unsigned(9_223_372_036_854_775_808.0),
-            s.iter().flat_map(|&v| (v ^ (1 << 63)).to_be_bytes()).collect(),
+            s.iter()
+                .flat_map(|&v| (v ^ (1 << 63)).to_be_bytes())
+                .collect(),
         ),
         Pixels::F32(s) => (
             Bitpix::F32,
@@ -1064,7 +1098,9 @@ fn assemble(
         return Err(FitsError::ShapeMismatch);
     }
     if !sc.bscale.is_finite() || sc.bscale == 0.0 || !sc.bzero.is_finite() {
-        return Err(FitsError::Unsupported("BSCALE must be finite and non-zero, BZERO finite"));
+        return Err(FitsError::Unsupported(
+            "BSCALE must be finite and non-zero, BZERO finite",
+        ));
     }
     let count = data.len() / bitpix.bytes();
     let expected = if dims.is_empty() {
@@ -1079,7 +1115,10 @@ fn assemble(
     }
 
     let mut cards = Vec::with_capacity(CARD * (8 + dims.len() + header.len()));
-    push_card(&mut cards, &logical("SIMPLE", true, "conforms to FITS standard"))?;
+    push_card(
+        &mut cards,
+        &logical("SIMPLE", true, "conforms to FITS standard"),
+    )?;
     push_card(
         &mut cards,
         &WriteCard {
@@ -1125,7 +1164,10 @@ fn assemble(
             },
         )?;
     }
-    push_card(&mut cards, &logical("EXTEND", true, "file may contain extensions"))?;
+    push_card(
+        &mut cards,
+        &logical("EXTEND", true, "file may contain extensions"),
+    )?;
     for card in header {
         if is_reserved(card.keyword) {
             return Err(FitsError::InvalidKeyword);
@@ -1158,8 +1200,16 @@ fn logical(keyword: &'static str, value: bool, comment: &'static str) -> WriteCa
 fn is_reserved(keyword: &str) -> bool {
     matches!(
         keyword,
-        "SIMPLE" | "BITPIX" | "EXTEND" | "BSCALE" | "BZERO" | "END" | "GROUPS" | "PCOUNT"
-            | "GCOUNT" | "XTENSION"
+        "SIMPLE"
+            | "BITPIX"
+            | "EXTEND"
+            | "BSCALE"
+            | "BZERO"
+            | "END"
+            | "GROUPS"
+            | "PCOUNT"
+            | "GCOUNT"
+            | "XTENSION"
     ) || keyword.starts_with("NAXIS")
 }
 
@@ -1192,7 +1242,10 @@ fn push_card(out: &mut Vec<u8>, card: &WriteCard<'_>) -> Result<()> {
         // Keep the separator only if some comment fits after it.
         let room = CARD.saturating_sub(line.len() + sep.len());
         if room > 0 {
-            let comment = card.comment.get(..room.min(card.comment.len())).unwrap_or("");
+            let comment = card
+                .comment
+                .get(..room.min(card.comment.len()))
+                .unwrap_or("");
             line.push_str(sep);
             line.push_str(comment);
         }
@@ -1320,7 +1373,10 @@ mod tests {
             assert_eq!(hdu.naxis(), 2);
             assert_eq!((hdu.axis_len(1), hdu.axis_len(2)), (5, 4));
             let got: Vec<f64> = hdu.values().collect();
-            assert!(same(&got, &ref_values(reference)), "mismatch for {bitpix:?}");
+            assert!(
+                same(&got, &ref_values(reference)),
+                "mismatch for {bitpix:?}"
+            );
         }
     }
 
@@ -1363,9 +1419,16 @@ mod tests {
     fn multi_hdu_file() {
         let all: Vec<Hdu<'_>> = hdus(MULTI).collect::<Result<_>>().unwrap();
         assert_eq!(all.len(), 3);
+        // The .f64be files hold the stored (unscaled) values of HDUs 0 and 2,
+        // so the physical expectation is BZERO + BSCALE * stored. HDU 1 is
+        // unscaled and its file is the physical value.
         for (hdu, reference) in all.iter().zip([REF_MULTI0, REF_MULTI1, REF_MULTI2]) {
             let got: Vec<f64> = hdu.values().collect();
-            assert!(same(&got, &ref_values(reference)));
+            let expected: Vec<f64> = ref_values(reference)
+                .into_iter()
+                .map(|s| hdu.bzero() + hdu.bscale() * s)
+                .collect();
+            assert!(same(&got, &expected));
         }
         assert_eq!(all[1].header().get("EXTNAME"), Some(Value::Text("SCI")));
         assert_eq!(all[2].bzero(), 100.0);
@@ -1401,10 +1464,8 @@ mod tests {
             assert!(primary(&BITPIX16[..n]).is_ok(), "prefix {n} rejected");
         }
         for n in 0..MULTI.len() {
-            for hdu in hdus(&MULTI[..n]) {
-                if let Ok(h) = hdu {
-                    let _ = h.values().count();
-                }
+            for h in hdus(&MULTI[..n]).flatten() {
+                let _ = h.values().count();
             }
         }
     }
@@ -1415,11 +1476,9 @@ mod tests {
         for _ in 0..2000 {
             let len = (rng.next() % 9000) as usize;
             let buf: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
-            for hdu in hdus(&buf) {
-                if let Ok(h) = hdu {
-                    let _ = h.values().count();
-                    let _ = h.to_native();
-                }
+            for h in hdus(&buf).flatten() {
+                let _ = h.values().count();
+                let _ = h.to_native();
             }
         }
         let fixtures = [BITPIX16, UINT32, MULTI];
@@ -1430,11 +1489,9 @@ mod tests {
                 let pos = (rng.next() as usize) % buf.len().min(3 * BLOCK);
                 buf[pos] = rng.next() as u8;
             }
-            for hdu in hdus(&buf) {
-                if let Ok(h) = hdu {
-                    let _ = h.values().count();
-                    let _ = h.to_native();
-                }
+            for h in hdus(&buf).flatten() {
+                let _ = h.values().count();
+                let _ = h.to_native();
             }
         }
     }
@@ -1565,7 +1622,8 @@ mod tests {
         let bytes = write_primary_f64(&header, Bitpix::F64, Scaling::NONE, &[1], &[7.0]).unwrap();
         assert_eq!(bytes.len(), 2 * BLOCK);
         let hdu = primary(&bytes).unwrap();
-        assert_eq!(hdu.header().get("OBJECT"), Some(Value::Text("O'Neil")));
+        // Text is returned as written, with `''` escapes left as two quotes.
+        assert_eq!(hdu.header().get("OBJECT"), Some(Value::Text("O''Neil")));
         assert_eq!(hdu.header().get("EXPTIME"), Some(Value::Float(1.5e-3)));
         assert_eq!(hdu.header().get("CRVAL1"), Some(Value::Float(-150.25)));
         assert_eq!(hdu.header().card("EXPTIME").unwrap().comment, "seconds");
@@ -1591,8 +1649,19 @@ mod tests {
             Err(FitsError::ShapeMismatch)
         );
         assert_eq!(
-            write_primary_f64(&[], Bitpix::F32, Scaling { bscale: 2.0, bzero: 0.0 }, &[1], &[1.0]),
-            Err(FitsError::Unsupported("scaling applies only to integer BITPIX"))
+            write_primary_f64(
+                &[],
+                Bitpix::F32,
+                Scaling {
+                    bscale: 2.0,
+                    bzero: 0.0
+                },
+                &[1],
+                &[1.0]
+            ),
+            Err(FitsError::Unsupported(
+                "scaling applies only to integer BITPIX"
+            ))
         );
         let reserved = [WriteCard {
             keyword: "NAXIS3",
