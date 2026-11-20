@@ -319,6 +319,22 @@ impl ShardingCodec {
         })
     }
 
+    /// Size in bytes of the shard index (entries plus optional checksum).
+    pub fn index_size(&self) -> usize {
+        self.index_len()
+    }
+
+    /// Byte offset of the index within a shard of `shard_len` bytes.
+    pub fn index_offset(&self, shard_len: u64) -> Result<u64> {
+        let il = self.index_len() as u64;
+        match self.location {
+            IndexLocation::End => shard_len
+                .checked_sub(il)
+                .ok_or_else(|| Error::Codec("sharding: shard shorter than its index".into())),
+            IndexLocation::Start => Ok(0),
+        }
+    }
+
     /// Parses and validates the shard index.
     pub fn parse_index(&self, shard: &[u8]) -> Result<ShardIndex> {
         let il = self.index_len();
@@ -327,9 +343,25 @@ impl ShardingCodec {
                 "sharding: shard shorter than its index".into(),
             ));
         }
-        let (index_bytes, data_start, data_end) = match self.location {
-            IndexLocation::End => (&shard[shard.len() - il..], 0, shard.len() - il),
-            IndexLocation::Start => (&shard[..il], il, shard.len()),
+        let index_bytes = match self.location {
+            IndexLocation::End => &shard[shard.len() - il..],
+            IndexLocation::Start => &shard[..il],
+        };
+        self.parse_index_section(index_bytes, shard.len())
+    }
+
+    /// Parses the index from its own bytes, given the total length of the
+    /// shard it belongs to. Partial reads use this to fetch the index alone.
+    pub fn parse_index_section(&self, index_bytes: &[u8], shard_len: usize) -> Result<ShardIndex> {
+        let il = self.index_len();
+        if index_bytes.len() != il || shard_len < il {
+            return Err(Error::Codec(
+                "sharding: index has the wrong length for this shard".into(),
+            ));
+        }
+        let (data_start, data_end) = match self.location {
+            IndexLocation::End => (0, shard_len - il),
+            IndexLocation::Start => (il, shard_len),
         };
         let pairs_len = ENTRY_LEN * self.num_inner_chunks();
         let pairs = &index_bytes[..pairs_len];
@@ -369,6 +401,84 @@ impl ShardingCodec {
             entries.push(Some((off, len)));
         }
         Ok(ShardIndex { entries })
+    }
+
+    /// Decodes only the inner chunks listed in `wanted` (C-order inner
+    /// indices). `read(offset, len)` returns the stored bytes of one inner chunk,
+    /// so a caller can fetch them with range reads. Other inner chunks, and
+    /// missing ones, are left at the fill value. Returns the whole shard in C
+    /// order.
+    pub fn decode_selected(
+        &self,
+        index: &ShardIndex,
+        wanted: &[usize],
+        mut read: impl FnMut(u64, u64) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        let mut out = self.fill_chunk();
+        let zero = vec![0u64; self.grid.len()];
+        for &n in wanted {
+            let entry = *index
+                .entries()
+                .get(n)
+                .ok_or_else(|| Error::InvalidSelection(format!("inner chunk {n} out of range")))?;
+            let Some((off, len)) = entry else { continue };
+            let stored = read(off, len)?;
+            let decoded = self.inner.decode(&stored)?;
+            if decoded.len() != self.inner_bytes() {
+                return Err(Error::SizeMismatch {
+                    expected: self.inner_bytes(),
+                    actual: decoded.len(),
+                });
+            }
+            let origin: Vec<u64> = self
+                .coords(n)
+                .iter()
+                .zip(&self.inner_shape)
+                .map(|(c, i)| c * i)
+                .collect();
+            copy_region(
+                (&decoded, &self.inner_shape, &zero),
+                (&mut out, &self.shard_shape, &origin),
+                &self.inner_shape,
+                self.item_size,
+            );
+        }
+        Ok(out)
+    }
+
+    /// C-order indices of the inner chunks touched by a selection. `selections`
+    /// has one `(start, step, count)` triple per shard dimension, the same
+    /// positions as a chunk piece (offsets within the shard).
+    pub fn inner_indices_touched(&self, selections: &[(u64, u64, u64)]) -> Result<Vec<usize>> {
+        if selections.len() != self.grid.len() {
+            return Err(Error::InvalidSelection(
+                "selection rank differs from the shard rank".into(),
+            ));
+        }
+        // Per dimension: the distinct inner positions touched. The touched set is
+        // a product over dimensions, because selections are regular slices.
+        let mut out: Vec<usize> = vec![0];
+        for (d, &(start, step, count)) in selections.iter().enumerate() {
+            let mut positions: Vec<u64> = (0..count)
+                .map(|k| (start + k * step) / self.inner_shape[d])
+                .collect();
+            positions.sort_unstable();
+            positions.dedup();
+            let mut next = Vec::with_capacity(out.len() * positions.len());
+            for &base in &out {
+                for &c in &positions {
+                    next.push(base * self.grid[d] as usize + c as usize);
+                }
+            }
+            out = next;
+        }
+        out.sort_unstable();
+        Ok(out)
+    }
+
+    /// Fill-value bytes of a whole shard, for callers that assemble one.
+    pub fn fill_shard(&self) -> Vec<u8> {
+        self.fill_chunk()
     }
 
     /// Decodes one inner chunk from `shard`: `Ok(None)` for a missing chunk,
