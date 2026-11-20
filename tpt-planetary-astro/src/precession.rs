@@ -142,6 +142,78 @@ pub(crate) mod matrix_impl {
         const NAME: &'static str = "MeanEquatorOfDate(IAU2006, no nutation)";
     }
 
+    /// Mean ecliptic and equinox of date (IAU 2006 precession and mean
+    /// obliquity, no nutation). Longitude is ecliptic longitude of date and
+    /// latitude is ecliptic latitude of date.
+    ///
+    /// Used as the target of [`icrs_to_mean_ecliptic_of_date`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct MeanEclipticOfDate;
+
+    impl Frame for MeanEclipticOfDate {
+        const NAME: &'static str = "MeanEcliptic(IAU2006 of date, no nutation)";
+    }
+
+    /// Passive rotation about the x-axis by `theta` radians.
+    fn rot_x(theta: f64) -> Matrix3 {
+        let (s, c) = theta.sin_cos();
+        [[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]]
+    }
+
+    /// The ICRS to mean-ecliptic-of-date matrix at TT `(tt_hi, tt_lo)`:
+    /// precession to the mean equator of date, then a rotation by the IAU 2006
+    /// mean obliquity of date about the x-axis.
+    fn icrs_to_mean_ecliptic_matrix(tt_hi: f64, tt_lo: f64) -> Matrix3 {
+        let t = ((tt_hi - crate::time::J2000_JD) + tt_lo) / 36_525.0;
+        let eps = crate::time::mean_obliquity_iau2006_rad(tt_hi, tt_lo);
+        mat_mul(&rot_x(eps), &precession_matrix(t))
+    }
+
+    /// Converts an ICRS direction to the mean ecliptic and equinox of date at
+    /// TT `(tt_hi, tt_lo)`.
+    ///
+    /// The ICRS axes are taken as the J2000 mean equator and equinox, as in
+    /// [`icrs_to_mean_equator_of_date`], so the frame bias is not applied. Nutation
+    /// is not applied either. At J2000.0 the result equals the J2000 mean ecliptic
+    /// ([`crate::frames::MeanEcliptic`]) to the frame bias.
+    ///
+    /// ```
+    /// use tpt_planetary_astro::frames::{Icrs, MeanEcliptic, SkyCoord};
+    /// use tpt_planetary_astro::precession::icrs_to_mean_ecliptic_of_date;
+    /// let star = SkyCoord::<Icrs>::from_degrees(10.0, 20.0);
+    /// let j2000 = (tpt_planetary_astro::time::J2000_JD, 0.0);
+    /// let date = icrs_to_mean_ecliptic_of_date(star, j2000.0, j2000.1);
+    /// let ref_j2000 = star.transform_to::<MeanEcliptic>();
+    /// assert!((date.lon() - ref_j2000.lon()).abs() < 1e-10);
+    /// assert!((date.lat() - ref_j2000.lat()).abs() < 1e-10);
+    /// ```
+    #[must_use]
+    pub fn icrs_to_mean_ecliptic_of_date(
+        coord: SkyCoord<Icrs>,
+        tt_hi: f64,
+        tt_lo: f64,
+    ) -> SkyCoord<MeanEclipticOfDate> {
+        rotate_direction(
+            &icrs_to_mean_ecliptic_matrix(tt_hi, tt_lo),
+            coord.lon(),
+            coord.lat(),
+        )
+    }
+
+    /// Inverse of [`icrs_to_mean_ecliptic_of_date`].
+    #[must_use]
+    pub fn mean_ecliptic_of_date_to_icrs(
+        coord: SkyCoord<MeanEclipticOfDate>,
+        tt_hi: f64,
+        tt_lo: f64,
+    ) -> SkyCoord<Icrs> {
+        rotate_direction(
+            &transpose(&icrs_to_mean_ecliptic_matrix(tt_hi, tt_lo)),
+            coord.lon(),
+            coord.lat(),
+        )
+    }
+
     pub(crate) fn mat_mul(a: &Matrix3, b: &Matrix3) -> Matrix3 {
         let mut out = [[0.0; 3]; 3];
         for (i, row) in out.iter_mut().enumerate() {
@@ -283,7 +355,8 @@ pub(crate) mod matrix_impl {
 
 #[cfg(feature = "std")]
 pub use matrix_impl::{
-    Matrix3, MeanEquatorOfDate, icrs_to_mean_equator_of_date, mean_equator_of_date_to_icrs,
+    Matrix3, MeanEclipticOfDate, MeanEquatorOfDate, icrs_to_mean_ecliptic_of_date,
+    icrs_to_mean_equator_of_date, mean_ecliptic_of_date_to_icrs, mean_equator_of_date_to_icrs,
     precession_matrix, precession_matrix_transpose, transpose,
 };
 
@@ -377,5 +450,42 @@ mod tests {
         assert!((zeta_a_arcsec(1.0) - zeta).abs() < 1e-12);
         assert!((z_a_arcsec(1.0) - z).abs() < 1e-12);
         assert!((theta_a_arcsec(1.0) - theta).abs() < 1e-12);
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod ecliptic_of_date_tests {
+    use super::*;
+    use crate::frames::{Icrs, SkyCoord};
+    use crate::time::J2000_JD;
+
+    #[test]
+    fn ecliptic_pole_moves_by_planetary_precession() {
+        // The north pole of the mean ecliptic of date, expressed in ICRS, is
+        // separated from the J2000 ecliptic pole by the planetary precession
+        // pi_A, about 47.0 arcseconds per century (Lieske 1977).
+        let pole_j2000 = mean_ecliptic_of_date_to_icrs(
+            SkyCoord::<MeanEclipticOfDate>::from_radians(0.0, core::f64::consts::FRAC_PI_2),
+            J2000_JD,
+            0.0,
+        );
+        let t1 = J2000_JD + 36_525.0;
+        let pole_date = mean_ecliptic_of_date_to_icrs(
+            SkyCoord::<MeanEclipticOfDate>::from_radians(0.0, core::f64::consts::FRAC_PI_2),
+            t1,
+            0.0,
+        );
+        let v1 = pole_j2000.to_unit_vector();
+        let v2 = pole_date.to_unit_vector();
+        let dot = (v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]).clamp(-1.0, 1.0);
+        let sep_arcsec = dot.acos().to_degrees() * 3600.0;
+        assert!((sep_arcsec - 47.0).abs() < 0.2, "sep {sep_arcsec}");
+
+        // Round trip through the date frame returns the ICRS direction.
+        let star = SkyCoord::<Icrs>::from_degrees(10.0, 20.0);
+        let rt =
+            mean_ecliptic_of_date_to_icrs(icrs_to_mean_ecliptic_of_date(star, t1, 0.0), t1, 0.0);
+        assert!((rt.lon() - star.lon()).abs() < 1e-12);
+        assert!((rt.lat() - star.lat()).abs() < 1e-12);
     }
 }

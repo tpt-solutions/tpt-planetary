@@ -329,6 +329,16 @@ mod matrix_impl {
         const NAME: &'static str = "TrueEquatorOfDate(IAU2006/2000A_R06, no frame bias)";
     }
 
+    /// True ecliptic and equinox of date: the true equator of date rotated by
+    /// the true obliquity `eps0 + deps` about the x-axis. Frame bias is not
+    /// included.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct TrueEclipticOfDate;
+
+    impl Frame for TrueEclipticOfDate {
+        const NAME: &'static str = "TrueEcliptic(IAU2006/2000A_R06 of date, no frame bias)";
+    }
+
     /// Passive rotation about the x-axis (same convention as `frames`).
     fn rot_x(theta: f64) -> Matrix3 {
         let (s, c) = theta.sin_cos();
@@ -415,6 +425,64 @@ mod matrix_impl {
         )
     }
 
+    /// Precession-nutation matrix with the ICRS frame bias: `N(t) P(t) B`,
+    /// mapping ICRS directly to the true equator of date. `B` is the ICRS to
+    /// J2000 mean-equator frame bias (about 17 mas), from
+    /// [`crate::cio::frame_bias_matrix`].
+    #[must_use]
+    pub fn true_equator_of_date_matrix_with_bias(tt_hi: f64, tt_lo: f64) -> Matrix3 {
+        mat_mul(
+            &true_equator_of_date_matrix(tt_hi, tt_lo),
+            &crate::cio::frame_bias_matrix(),
+        )
+    }
+
+    /// The ICRS to true-ecliptic-of-date matrix at TT `(tt_hi, tt_lo)`.
+    #[must_use]
+    pub fn icrs_to_true_ecliptic_matrix(tt_hi: f64, tt_lo: f64) -> Matrix3 {
+        let t = centuries_since_j2000(tt_hi, tt_lo);
+        let (_, deps) = nutation_angles_t(t);
+        let eps_true = mean_obliquity_iau2006_rad(tt_hi, tt_lo) + deps;
+        mat_mul(&rot_x(eps_true), &true_equator_of_date_matrix(tt_hi, tt_lo))
+    }
+
+    /// Converts an ICRS direction to the true ecliptic and equinox of date at
+    /// the TT two-part Julian date. Frame bias is not applied (about 17 mas).
+    ///
+    /// ```
+    /// use tpt_planetary_astro::frames::{Icrs, SkyCoord};
+    /// use tpt_planetary_astro::nutation::icrs_to_true_ecliptic_of_date;
+    /// let star = SkyCoord::<Icrs>::from_degrees(83.6, 22.0);
+    /// let e = icrs_to_true_ecliptic_of_date(star, 2_451_545.0, 0.0);
+    /// assert!(e.lat().is_finite() && e.lon() >= 0.0);
+    /// ```
+    #[must_use]
+    pub fn icrs_to_true_ecliptic_of_date(
+        coord: SkyCoord<Icrs>,
+        tt_hi: f64,
+        tt_lo: f64,
+    ) -> SkyCoord<TrueEclipticOfDate> {
+        rotate_direction(
+            &icrs_to_true_ecliptic_matrix(tt_hi, tt_lo),
+            coord.lon(),
+            coord.lat(),
+        )
+    }
+
+    /// Inverse of [`icrs_to_true_ecliptic_of_date`].
+    #[must_use]
+    pub fn true_ecliptic_of_date_to_icrs(
+        coord: SkyCoord<TrueEclipticOfDate>,
+        tt_hi: f64,
+        tt_lo: f64,
+    ) -> SkyCoord<Icrs> {
+        rotate_direction(
+            &transpose(&icrs_to_true_ecliptic_matrix(tt_hi, tt_lo)),
+            coord.lon(),
+            coord.lat(),
+        )
+    }
+
     /// Converts a direction from the mean equator of date to the true equator
     /// of date at the TT two-part Julian date (nutation only).
     #[must_use]
@@ -444,9 +512,11 @@ mod matrix_impl {
 
 #[cfg(feature = "std")]
 pub use matrix_impl::{
-    TrueEquatorOfDate, icrs_to_true_equator_of_date, mean_to_true_equator_of_date, nutation_matrix,
-    nutation_matrix_from_angles, true_equator_of_date_matrix, true_equator_of_date_to_icrs,
-    true_to_mean_equator_of_date,
+    TrueEclipticOfDate, TrueEquatorOfDate, icrs_to_true_ecliptic_matrix,
+    icrs_to_true_ecliptic_of_date, icrs_to_true_equator_of_date, mean_to_true_equator_of_date,
+    nutation_matrix, nutation_matrix_from_angles, true_ecliptic_of_date_to_icrs,
+    true_equator_of_date_matrix, true_equator_of_date_matrix_with_bias,
+    true_equator_of_date_to_icrs, true_to_mean_equator_of_date,
 };
 
 #[cfg(test)]
@@ -520,5 +590,68 @@ mod tests {
             "deps = {}",
             arcsec(deps)
         );
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod frame_bias_tests {
+    use super::*;
+
+    #[test]
+    fn frame_bias_shifts_the_true_equator_by_about_17_mas() {
+        let (hi, lo) = (2_451_545.0, 0.0);
+        let with = true_equator_of_date_matrix_with_bias(hi, lo);
+        let without = true_equator_of_date_matrix(hi, lo);
+        let mut max = 0.0f64;
+        for i in 0..3 {
+            for j in 0..3 {
+                max = max.max((with[i][j] - without[i][j]).abs());
+            }
+        }
+        // 17 mas is 8.2e-8 rad; the largest matrix element changes by about that.
+        assert!(max > 3e-8 && max < 2e-7, "max change {max}");
+        // Each row is still a unit vector.
+        for row in &with {
+            let norm: f64 = row.iter().map(|x| x * x).sum();
+            assert!((norm - 1.0).abs() < 1e-12);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod true_ecliptic_tests {
+    use super::*;
+    use crate::frames::{Icrs, SkyCoord};
+    use crate::precession::{icrs_to_mean_ecliptic_of_date, mean_ecliptic_of_date_to_icrs};
+
+    fn separation_arcsec(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0);
+        dot.acos().to_degrees() * 3600.0
+    }
+
+    #[test]
+    fn nutation_moves_the_ecliptic_by_less_than_twenty_arcseconds() {
+        // Nutation in longitude is at most about 17.2" and in obliquity about
+        // 9.2". The true and mean ecliptics of date differ by less than 20" in
+        // the ICRS frame at any epoch.
+        let star = SkyCoord::<Icrs>::from_degrees(83.6, 22.0);
+        for (hi, lo) in [(2_451_545.0, 0.0), (2_460_000.5, 0.25), (2_415_020.5, 0.0)] {
+            let mean_icrs =
+                mean_ecliptic_of_date_to_icrs(icrs_to_mean_ecliptic_of_date(star, hi, lo), hi, lo);
+            let true_icrs =
+                true_ecliptic_of_date_to_icrs(icrs_to_true_ecliptic_of_date(star, hi, lo), hi, lo);
+            let sep = separation_arcsec(mean_icrs.to_unit_vector(), true_icrs.to_unit_vector());
+            assert!(sep < 20.0, "epoch {hi}+{lo}: {sep} arcsec");
+        }
+    }
+
+    #[test]
+    fn true_ecliptic_round_trip() {
+        let star = SkyCoord::<Icrs>::from_degrees(250.0, -40.0);
+        let (hi, lo) = (2_460_000.5, 0.3);
+        let back =
+            true_ecliptic_of_date_to_icrs(icrs_to_true_ecliptic_of_date(star, hi, lo), hi, lo);
+        assert!((back.lon() - star.lon()).abs() < 1e-13);
+        assert!((back.lat() - star.lat()).abs() < 1e-13);
     }
 }
