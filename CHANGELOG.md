@@ -91,6 +91,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Read-only HDF5 subset, and blosclz far back-references (distances above 8191).
 - FITS binary tables: `Hdu::table` reads the fixed-width column forms with
   scaling and nulls, checked against astropy.
+- FITS binary table writer (`fits::write_bintable`) for the same fixed-width
+  forms, with TSCAL, TZERO and TNULL; checked by a round trip and by astropy.
 - Apparent directions from an SPK kernel (`ephemeris::apparent_direction`, and
   `tptplan ephemeris query --apparent`): light deflection by the Sun and annual
   aberration on the astrometric direction. Checked against Horizons apparent
