@@ -4,13 +4,15 @@
 //! Julian date, following the usual SOFA/ERFA convention. This keeps the
 //! fractional-day precision that a single `f64` Julian date would lose.
 //!
-//! The TDB - TT model uses only the three leading geocentric terms of the
-//! Fairhead & Bretagnon series. It is an approximation: the omitted terms
-//! contribute on the order of tens of microseconds and the full series is not
-//! implemented here. Validation against the full series is tracked as a
-//! Phase 2 item.
+//! The TDB - TT model is the full geocentric Fairhead & Bretagnon (1990)
+//! series, 787 terms as coded in ERFA's `dtdb` (see [`crate::tdb_data`]), plus
+//! the JPL-mass adjustment terms that ERFA adds. The topocentric terms of
+//! `dtdb` depend on the observer's position and are not included, so the
+//! result is the geocentre value.
 
 use core::f64::consts::{PI, TAU};
+
+use crate::tdb_data::{FAIRHEAD_GROUP_ENDS, FAIRHEAD_TERMS};
 
 /// Julian date of the J2000.0 epoch (JD 2451545.0 TT).
 pub const J2000_JD: f64 = 2_451_545.0;
@@ -27,33 +29,47 @@ pub const SECONDS_PER_DAY: f64 = 86_400.0;
 /// Radians per arcsecond.
 const RAD_PER_ARCSEC: f64 = PI / (180.0 * 3600.0);
 
-/// Leading terms of the geocentric TDB - TT series.
-///
-/// Each entry is `(amplitude_s, frequency_rad_per_millennium, phase_rad)`, and
-/// the term contributes `amplitude * sin(frequency * t + phase)`, where `t` is
-/// Julian millennia since J2000 TT. Only the first three terms are included.
-/// Their values are transcribed from the Fairhead & Bretagnon / ERFA `dtdb`
-/// leading terms; they have not been checked against the source tables here.
-const DTDB_LEADING_TERMS: [(f64, f64, f64); 3] = [
-    (1.656_674_564e-3, 6_283.075_849_991, 6.240_054_195),
-    (22.417_471e-6, 5_753.384_884_897, 4.296_977_442),
-    (13.839_792e-6, 12_566.151_699_983, 6.196_904_410),
+/// JPL planetary-mass adjustments to the Fairhead & Bretagnon series, as in
+/// ERFA `dtdb`: `(amplitude_s, frequency_rad_per_millennium, phase_rad)`.
+const DTDB_MASS_TERMS: [(f64, f64, f64); 4] = [
+    (0.000_65e-6, 6_069.776_754, 4.021_194),
+    (0.000_33e-6, 213.299_095, 5.543_132),
+    (-0.001_96e-6, 6_208.294_251, 5.696_701),
+    (-0.001_73e-6, 74.781_599, 2.435_900),
 ];
 
-/// Approximate TDB - TT in seconds at the given TT Julian date.
+/// Quadratic-in-T coefficient of the JPL mass adjustment, in seconds per
+/// millennium squared.
+const DTDB_MASS_T2: f64 = 0.036_38e-6;
+
+/// Geocentric TDB - TT in seconds at the given TT Julian date.
 ///
-/// Uses only the leading terms listed in the module source (three of the
-/// Fairhead & Bretagnon series). The result is an approximation accurate to
-/// the level of the omitted terms, not the full series.
+/// Evaluates the full Fairhead & Bretagnon series with the JPL-mass
+/// adjustments, as in ERFA `eraDtdb` with the observer at the geocentre. The
+/// amplitudes are in seconds; the series has a magnitude of about 1.7 ms.
 ///
 /// `tt_hi + tt_lo` is the TT Julian date.
 #[must_use]
 pub fn tdb_minus_tt_seconds(tt_hi: f64, tt_lo: f64) -> f64 {
     let t = ((tt_hi - J2000_JD) + tt_lo) / DAYS_PER_MILLENNIUM;
-    DTDB_LEADING_TERMS
+    // Group k holds the terms multiplied by t^k. Sum each group, then combine.
+    let mut total = 0.0;
+    let mut power = 1.0;
+    let mut start = 0;
+    for &end in &FAIRHEAD_GROUP_ENDS {
+        let group: f64 = FAIRHEAD_TERMS[start..end]
+            .iter()
+            .map(|&(amp, freq, phase)| amp * (freq * t + phase).sin())
+            .sum();
+        total += group * power;
+        power *= t;
+        start = end;
+    }
+    let mass: f64 = DTDB_MASS_TERMS
         .iter()
         .map(|&(amp, freq, phase)| amp * (freq * t + phase).sin())
-        .sum()
+        .sum();
+    total + mass + DTDB_MASS_T2 * t * t
 }
 
 /// Converts a TT Julian date to TDB, returned as a two-part Julian date.
@@ -218,26 +234,36 @@ mod tests {
     }
 
     #[test]
-    fn dtdb_at_j2000_matches_hand_evaluated_leading_terms() {
-        // Evaluate the three leading terms by hand at t = 0:
-        // sin(6.240054195), sin(4.296977442), sin(6.196904410).
-        let expected = 1.656_674_564e-3 * 6.240_054_195_f64.sin()
-            + 22.417_471e-6 * 4.296_977_442_f64.sin()
-            + 13.839_792e-6 * 6.196_904_410_f64.sin();
-        let got = tdb_minus_tt_seconds(J2000_JD, 0.0);
-        assert!((got - expected).abs() < 1e-15);
-        // The sum is negative (about -93 microseconds) at J2000 with these terms.
-        assert!(got < 0.0 && got > -100e-6);
+    fn dtdb_matches_erfa_dtdb_reference_values() {
+        // Reference values from erfa.dtdb (pyerfa 2.0.1.5), geocentre
+        // (ut = elong = u = v = 0). Arguments are (TT hi, TT lo).
+        let cases: [(f64, f64, f64); 6] = [
+            (2_451_545.0, 0.0, -9.930_719_894_379_447e-5),
+            (2_451_545.0, 0.25, -9.207_139_216_018_104e-5),
+            (2_415_020.5, 0.0, -1.846_023_201_048_501_5e-5),
+            (2_469_807.5, 0.5, -6.589_933_159_075_999e-5),
+            (2_488_069.5, 0.0, -8.994_766_298_524_835e-5),
+            (2_433_282.5, 0.123_456, -6.711_697_302_277_03e-5),
+        ];
+        for (hi, lo, expected) in cases {
+            let got = tdb_minus_tt_seconds(hi, lo);
+            // Agreement to 1 ns; the cases are 10 to 100 us in size.
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "TT {hi} + {lo}: got {got}, erfa {expected}"
+            );
+        }
     }
 
     #[test]
-    fn dtdb_bounded_by_leading_amplitude() {
-        // Sweep one decade of centuries; the 3-term sum is bounded by its amplitudes.
-        let bound = 1.656_674_564e-3 + 22.417_471e-6 + 13.839_792e-6;
-        for k in 0..200 {
+    fn dtdb_peak_is_about_one_point_seven_milliseconds() {
+        // The series peaks near 1.66 ms, the amplitude of its leading term.
+        let mut peak: f64 = 0.0;
+        for k in 0..2_000 {
             let jd = J2000_JD + f64::from(k) * 37.3;
-            assert!(tdb_minus_tt_seconds(jd, 0.0).abs() <= bound + 1e-12);
+            peak = peak.max(tdb_minus_tt_seconds(jd, 0.0).abs());
         }
+        assert!(peak > 1.6e-3 && peak < 1.8e-3, "peak {peak}");
     }
 
     #[test]

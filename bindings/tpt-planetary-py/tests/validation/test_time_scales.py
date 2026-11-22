@@ -11,11 +11,8 @@ seeded random UT1 = UTC epochs in 2000-2026 with a stated UT1 - UTC of 0 and
 TT = UT1 + 69.184 s; obliquity at J2000.0, +1 and +10 Julian centuries.
 
 Tolerances (set before measuring):
-- TDB, full validation: 1 microsecond. The crate implements only the three
-  leading terms, so a pass is not expected; the test is xfail (strict) and
-  records the measured maximum.
-- TDB regression guard: 20 microseconds (the crate documents the omitted terms
-  as "tens of microseconds"). It only catches a larger regression.
+- TDB: 1 microsecond against erfa.dtdb. The crate evaluates the full
+  Fairhead & Bretagnon series, so the difference is at the level of rounding.
 - ERA, GMST, obliquity: 1 milliarcsecond. Both sides use the same published
   formula, so the difference should be at the level of double-precision
   rounding; 1 mas is a loose bound for that.
@@ -33,7 +30,6 @@ from _reference import run_validation_dump
 ARCSEC_PER_RAD = 180.0 * 3600.0 / np.pi
 MAS = 1e-3  # arcseconds per milliarcsecond
 TDB_VALIDATION_TOL_US = 1.0
-TDB_REGRESSION_TOL_US = 20.0
 ANGLE_TOL_ARCSEC = 1.0 * MAS
 
 RNG = np.random.default_rng(20260101)
@@ -60,22 +56,9 @@ def _max_tdb_error_us():
     return float(np.abs(diff_us).max()), float(diff_us.mean()), float(diff_us.std())
 
 
-def test_tdb_regression_guard_three_terms():
-    max_us, mean_us, std_us = _max_tdb_error_us()
-    print(f"\nTDB-TT vs erfa.dtdb: max |diff| {max_us:.3f} us, mean {mean_us:.3f} us, std {std_us:.3f} us")
-    assert max_us < TDB_REGRESSION_TOL_US
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "tt_to_tdb keeps only the three leading terms of the Fairhead & Bretagnon "
-        "series; the omitted terms reach about 15 us over 2000-2026 (see the "
-        "regression test for the measured value)."
-    ),
-)
 def test_tdb_minus_tt_matches_erfa_dtdb_to_1us():
-    max_us, _, _ = _max_tdb_error_us()
+    max_us, mean_us, std_us = _max_tdb_error_us()
+    print(f"\nTDB-TT vs erfa.dtdb: max |diff| {max_us:.3e} us, mean {mean_us:.3e} us, std {std_us:.3e} us")
     assert max_us <= TDB_VALIDATION_TOL_US, f"max |diff| = {max_us:.3f} us"
 
 
