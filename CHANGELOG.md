@@ -89,6 +89,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Climate-index pipelines on lazy fields (`ops::climate`): monthly anomaly,
   area-weighted box means, the Niño-3.4 index and its relative form.
 - Read-only HDF5 subset, and blosclz far back-references (distances above 8191).
+- FITS binary tables: `Hdu::table` reads the fixed-width column forms with
+  scaling and nulls, checked against astropy.
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
   coefficients; matches `erfa.nut00b` to 1e-13 rad.
 - Atmospheric refraction for Alt/Az: the ERFA `refco` constants
