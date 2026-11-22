@@ -204,6 +204,77 @@ pub struct Keplerian {
     pub epoch: JulianDate,
 }
 
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn norm3(a: [f64; 3]) -> f64 {
+    dot3(a, a).sqrt()
+}
+
+fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+/// Velocity at the middle of three position vectors on one orbit, by Gibbs'
+/// method (Vallado, *Fundamentals of Astrodynamics*, algorithm 52).
+///
+/// `r1`, `r2`, `r3` are positions in km in the same inertial frame, at three
+/// times `t1 < t2 < t3`, and `mu` is the gravitational parameter in km^3/s^2
+/// (for example [`WGS72_MU_KM3_S2`]). The result is the velocity at `r2` in
+/// km/s, and is exact for an unperturbed two-body orbit. The method needs the
+/// three positions to be well separated in angle: for nearly collinear
+/// directions use Herrick-Gibbs instead (not implemented here).
+///
+/// Returns [`OrbitError::DegenerateState`] if the positions are coplanar with
+/// the origin in a degenerate way (zero cross products) and
+/// [`OrbitError::InvalidElements`] for a non-positive `mu`.
+pub fn gibbs_velocity(
+    r1: [f64; 3],
+    r2: [f64; 3],
+    r3: [f64; 3],
+    mu: f64,
+) -> Result<[f64; 3], OrbitError> {
+    if mu.is_nan() || mu <= 0.0 || !mu.is_finite() {
+        return Err(OrbitError::InvalidElements);
+    }
+    let (n1, n2, n3) = (norm3(r1), norm3(r2), norm3(r3));
+    if n1 == 0.0 || n2 == 0.0 || n3 == 0.0 {
+        return Err(OrbitError::DegenerateState);
+    }
+    let c12 = cross(r1, r2);
+    let c23 = cross(r2, r3);
+    let c31 = cross(r3, r1);
+    let d = add3(add3(c12, c23), c31);
+    let nvec = add3(
+        add3(scale3(cross(r2, r3), n1), scale3(cross(r3, r1), n2)),
+        scale3(cross(r1, r2), n3),
+    );
+    let svec = add3(
+        add3(scale3(r1, n2 - n3), scale3(r2, n3 - n1)),
+        scale3(r3, n1 - n2),
+    );
+    let (nm, dm) = (norm3(nvec), norm3(d));
+    if nm == 0.0 || dm == 0.0 || !nm.is_finite() || !dm.is_finite() {
+        return Err(OrbitError::DegenerateState);
+    }
+    let k = (mu / (nm * dm)).sqrt();
+    let v2 = add3(scale3(cross(d, r2), 1.0 / n2), svec);
+    Ok(scale3(v2, k))
+}
+
 /// Solves Kepler's equation `M = E - e sin E` for the eccentric anomaly `E`
 /// by Newton's method, with the defaults [`KEPLER_TOLERANCE_RAD`] and
 /// [`KEPLER_MAX_ITERATIONS`].
@@ -274,14 +345,6 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// Cross product of two 3-vectors.
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
 /// Euclidean norm of a 3-vector.
 fn norm(a: [f64; 3]) -> f64 {
     dot(a, a).sqrt()
@@ -1508,6 +1571,48 @@ mod tests {
         assert_eq!(
             Tle::parse(VANGUARD_L1, &l2),
             Err(OrbitError::TleSatelliteMismatch)
+        );
+    }
+
+    #[test]
+    fn gibbs_recovers_the_middle_velocity_of_a_kepler_orbit() {
+        // A moderately eccentric LEO-to-GEO-ish orbit; three true anomalies, 40 degrees apart.
+        let base = |nu: f64| Keplerian {
+            semi_major_axis_km: 9_000.0,
+            eccentricity: 0.2,
+            inclination_rad: 0.9,
+            raan_rad: 0.4,
+            arg_perigee_rad: 1.1,
+            anomaly: Anomaly::True(nu),
+            epoch: JulianDate::new(2_451_545.0, 0.0),
+        };
+        let s1 = base(0.2).to_state().unwrap();
+        let s2 = base(0.9).to_state().unwrap();
+        let s3 = base(1.6).to_state().unwrap();
+        let v = gibbs_velocity(
+            s1.position_km,
+            s2.position_km,
+            s3.position_km,
+            WGS72_MU_KM3_S2,
+        )
+        .unwrap();
+        for (k, vk) in v.iter().enumerate() {
+            assert!(
+                (vk - s2.velocity_km_s[k]).abs() < 1e-8,
+                "component {k}: {} vs {}",
+                v[k],
+                s2.velocity_km_s[k]
+            );
+        }
+        // Degenerate inputs are rejected.
+        let z = [0.0; 3];
+        assert_eq!(
+            gibbs_velocity(z, s2.position_km, s3.position_km, WGS72_MU_KM3_S2),
+            Err(OrbitError::DegenerateState)
+        );
+        assert_eq!(
+            gibbs_velocity(s1.position_km, s2.position_km, s3.position_km, 0.0),
+            Err(OrbitError::InvalidElements)
         );
     }
 }
