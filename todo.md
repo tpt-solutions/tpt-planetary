@@ -230,7 +230,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] PyO3 module scaffold, `maturin` build config
 - [x] Bind core: time scales, angles, spherical math
 - [ ] Bind astro: frames, ephemeris, WCS — PARTIAL (scope per ADR-004): ICRS and Galactic frames and WCS are bound and their validation suite runs; ephemeris is deferred until kernel validation.
-- [ ] Bind array: open Zarr/NetCDF3, slice, lazy ops, compute — PARTIAL: local Zarr with slicing, float64 reads and reductions; NetCDF-3 files can be opened, listed and read whole (`open_netcdf3`, no slicing yet); no remote stores
+- [ ] Bind array: open Zarr/NetCDF3, slice, lazy ops, compute — PARTIAL: local Zarr with slicing, float64 reads and reductions; NetCDF-3 files can be opened, listed and read whole or by selection (`open_netcdf3`; the whole variable is decoded first, so no partial I/O); no remote stores
 - [ ] NumPy interop (zero-copy where possible) via `numpy` crate — PARTIAL: copies on read, no zero-copy path
 - [ ] xarray / Dask integration (backend entrypoint or adapter) and SunPy/Astropy interop notes
 - [ ] Async/GIL handling for S3 streaming — PARTIAL: GIL released for reads and reductions; no S3 streaming
