@@ -53,6 +53,8 @@
 //! functions and are gated on `std`.
 
 #[cfg(feature = "std")]
+use crate::nutation_b_data::NUT00B_TERMS;
+#[cfg(feature = "std")]
 use crate::nutation_data::{LONGITUDE_J0, LONGITUDE_J1, OBLIQUITY_J0, OBLIQUITY_J1};
 
 /// Julian date of J2000.0 (TT).
@@ -297,6 +299,48 @@ pub fn nutation_angles_t_without_out_of_phase_rates(t: f64) -> (f64, f64) {
 #[must_use]
 pub fn nutation_angles(tt_hi: f64, tt_lo: f64) -> (f64, f64) {
     nutation_angles_t(centuries_since_j2000(tt_hi, tt_lo))
+}
+
+/// Nutation in longitude and obliquity `(dpsi, deps)` in radians at a TT
+/// two-part Julian date, from the IAU 2000B model (McCarthy & Luzum 2003).
+///
+/// This is the 77-term luni-solar series of IAU 2000B, with the Simon et al.
+/// (1994) fundamental arguments, plus the fixed planetary offsets of ERFA's
+/// `eraNut00b` (-0.135 and +0.388 milliarcseconds). It agrees with the full
+/// IAU 2000A series ([`nutation_angles`]) to about 2 milliarcseconds over
+/// 1900-2100 (2.3 mas at most in the measured sweep). The
+/// series is the one ERFA's `nut00b` evaluates; it is not the IERS 2010 model.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn nutation_angles_2000b(tt_hi: f64, tt_lo: f64) -> (f64, f64) {
+    const TURNAS: f64 = 1_296_000.0;
+    const UNIT_RAD: f64 = RAD_PER_ARCSEC * 1e-7; // 0.1 microarcsecond
+    const PLANETARY_DPSI: f64 = -0.135 * 1e-3 * RAD_PER_ARCSEC;
+    const PLANETARY_DEPS: f64 = 0.388 * 1e-3 * RAD_PER_ARCSEC;
+    let t = centuries_since_j2000(tt_hi, tt_lo);
+    let two_pi = core::f64::consts::TAU;
+    let el = (485_868.249_036 + 1_717_915_923.217_8 * t) % TURNAS * RAD_PER_ARCSEC;
+    let elp = (1_287_104.793_05 + 129_596_581.048_1 * t) % TURNAS * RAD_PER_ARCSEC;
+    let f = (335_779.526_232 + 1_739_527_262.847_8 * t) % TURNAS * RAD_PER_ARCSEC;
+    let d = (1_072_260.703_69 + 1_602_961_601.209_0 * t) % TURNAS * RAD_PER_ARCSEC;
+    let om = (450_160.398_036 - 6_962_890.543_1 * t) % TURNAS * RAD_PER_ARCSEC;
+    let mut dp = 0.0;
+    let mut de = 0.0;
+    for &([nl, nlp, nf, nd, nom], [ps, pst, pc, ec, ect, es]) in NUT00B_TERMS.iter() {
+        let arg = (f64::from(nl) * el
+            + f64::from(nlp) * elp
+            + f64::from(nf) * f
+            + f64::from(nd) * d
+            + f64::from(nom) * om)
+            % two_pi;
+        let (sarg, carg) = arg.sin_cos();
+        dp += (ps + pst * t) * sarg + pc * carg;
+        de += (ec + ect * t) * carg + es * sarg;
+    }
+    (
+        dp * UNIT_RAD + PLANETARY_DPSI,
+        de * UNIT_RAD + PLANETARY_DEPS,
+    )
 }
 
 /// Equation of the equinoxes in radians: `dpsi * cos(eps0) + C`, where `eps0`
@@ -653,5 +697,75 @@ mod true_ecliptic_tests {
             true_ecliptic_of_date_to_icrs(icrs_to_true_ecliptic_of_date(star, hi, lo), hi, lo);
         assert!((back.lon() - star.lon()).abs() < 1e-13);
         assert!((back.lat() - star.lat()).abs() < 1e-13);
+    }
+
+    #[test]
+    fn iau2000b_matches_erfa_nut00b() {
+        // Reference values from erfa.nut00b (pyerfa 2.0.1.5), in radians.
+        let cases: [(f64, f64, f64, f64); 6] = [
+            (
+                2_451_545.0,
+                0.0,
+                -6.754_261_253_992_235e-5,
+                -2.797_092_331_098_565_3e-5,
+            ),
+            (
+                2_451_545.0,
+                0.25,
+                -6.752_906_372_845_324e-5,
+                -2.799_613_025_908_025_6e-5,
+            ),
+            (
+                2_415_020.5,
+                0.0,
+                8.451_870_269_689_337e-5,
+                -1.110_315_358_682_490_6e-5,
+            ),
+            (
+                2_469_807.5,
+                0.5,
+                7.350_883_889_714_072e-5,
+                -2.592_637_712_304_5e-5,
+            ),
+            (
+                2_488_069.5,
+                0.0,
+                1.594_957_642_398_022_2e-5,
+                4.151_855_368_104_876e-5,
+            ),
+            (
+                2_460_000.5,
+                0.3,
+                -4.502_777_372_894_348e-5,
+                3.748_892_790_253_216e-5,
+            ),
+        ];
+        for (hi, lo, dpsi, deps) in cases {
+            let (got_psi, got_eps) = nutation_angles_2000b(hi, lo);
+            assert!(
+                (got_psi - dpsi).abs() < 1e-13,
+                "dpsi at {hi}+{lo}: {got_psi} vs {dpsi}"
+            );
+            assert!(
+                (got_eps - deps).abs() < 1e-13,
+                "deps at {hi}+{lo}: {got_eps} vs {deps}"
+            );
+        }
+    }
+
+    #[test]
+    fn iau2000b_agrees_with_iau2000a_to_a_few_milliarcseconds() {
+        // Measured over 1900-2100 (200 epochs at 365-day steps from J2000 -/+
+        // 100 years): the largest differences are 2.3 mas in dpsi and 0.9 mas in
+        // deps. The bound is 3 mas. The 2000B model is coarser than 2000A far
+        // from 2000, so this is a loose guard, not a validation.
+        let three_mas = 3.0e-3 * RAD_PER_ARCSEC;
+        for k in 0..200 {
+            let hi = 2_451_545.0 + (f64::from(k) - 100.0) * 365.0;
+            let (a_psi, a_eps) = nutation_angles(hi, 0.0);
+            let (b_psi, b_eps) = nutation_angles_2000b(hi, 0.0);
+            assert!((a_psi - b_psi).abs() < three_mas, "k={k} dpsi");
+            assert!((a_eps - b_eps).abs() < three_mas, "k={k} deps");
+        }
     }
 }

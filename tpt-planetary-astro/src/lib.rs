@@ -42,6 +42,9 @@ pub mod precession;
 mod nutation_data;
 
 #[cfg(feature = "std")]
+mod nutation_b_data;
+
+#[cfg(feature = "std")]
 pub mod cio;
 #[cfg(feature = "std")]
 mod cio_data;
@@ -53,9 +56,9 @@ pub mod frames;
 #[cfg(feature = "std")]
 pub mod orbit;
 #[cfg(feature = "std")]
-pub mod time;
-#[cfg(feature = "std")]
 mod tdb_data;
+#[cfg(feature = "std")]
+pub mod time;
 #[cfg(feature = "std")]
 pub mod wcs;
 
