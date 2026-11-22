@@ -13,6 +13,7 @@
 mod array;
 mod astro;
 mod core_api;
+mod ephemeris;
 mod errors;
 
 use pyo3::prelude::*;
@@ -48,6 +49,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(astro::earth_rotation_angle, m)?)?;
     m.add_function(wrap_pyfunction!(astro::gmst_iau2006, m)?)?;
     m.add_class::<astro::Wcs>()?;
+
+    // Ephemerides: SPK kernels, states, astrometric and apparent directions.
+    m.add_class::<ephemeris::SpkKernel>()?;
+    m.add_function(wrap_pyfunction!(ephemeris::open_spk, m)?)?;
+    m.add_function(wrap_pyfunction!(ephemeris::et_from_tdb, m)?)?;
 
     // Array: local Zarr v2/v3 directories, NetCDF-3 files and lazy reductions.
     m.add_class::<array::ZarrArray>()?;

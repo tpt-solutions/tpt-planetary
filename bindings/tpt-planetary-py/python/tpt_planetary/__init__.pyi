@@ -205,3 +205,40 @@ def open_zarr(path: str | PathLike[str]) -> ZarrArray:
     Raises FileNotFoundError if no array metadata is present.
     """
     ...
+
+
+class SpkKernel:
+    """A DE440-style SPK kernel held in memory (see ``open_spk``).
+
+    Times are TDB as seconds past J2000. Directions are ICRF.
+    """
+
+    def state(
+        self, target: int, center: int, et: float
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Position (km) and velocity (km/s) of ``target`` relative to ``center``."""
+        ...
+    def astrometric(self, target: int, observer: int, et: float) -> dict[str, float]:
+        """Astrometric direction: ``ra_deg``, ``dec_deg``, ``distance_km``, ``light_time_s``.
+
+        Light-time corrected, without stellar aberration (as JPL Horizons' astrometric RA and Dec).
+        """
+        ...
+    def apparent(self, target: int, observer: int, et: float) -> dict[str, float]:
+        """Apparent direction: ``ra_deg``, ``dec_deg``, ``light_time_s``.
+
+        The astrometric direction with the Sun's light deflection and the annual aberration applied.
+        """
+        ...
+
+def open_spk(path: str | PathLike[str]) -> SpkKernel:
+    """Open and read the SPK kernel at ``path``.
+
+    Raises OSError if the file cannot be read and TptPlanetaryError if it is not an SPK file.
+    Kernels are not bundled; obtain one from JPL (for example de440s.bsp).
+    """
+    ...
+
+def et_from_tdb(jd_hi: float, jd_lo: float) -> float:
+    """Seconds past J2000 TDB for a TDB Julian date given in two parts."""
+    ...
