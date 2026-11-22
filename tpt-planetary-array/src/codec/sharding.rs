@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use serde_json::{Value, json};
 
 use super::crc32c::crc32c;
+use super::transpose::TransposeCodec;
 use super::{Codec, Pipeline, Registry};
 use crate::dtype::{DType, Endian};
 use crate::error::{Error, Result};
@@ -156,6 +157,8 @@ pub struct ShardingCodec {
     item_size: usize,
     fill: Vec<u8>,
     inner: Pipeline,
+    /// Array-to-array transpose at the start of the inner chain, if any.
+    inner_transpose: Option<TransposeCodec>,
     index_crc: bool,
     location: IndexLocation,
 }
@@ -202,7 +205,7 @@ impl ShardingCodec {
             ));
         }
 
-        let inner = build_inner(config, dtype, registry)?;
+        let (inner, inner_transpose) = build_inner(config, &inner_shape, dtype, registry)?;
         let (index_crc, location) = parse_index_options(config)?;
 
         Ok(Self {
@@ -212,6 +215,7 @@ impl ShardingCodec {
             item_size,
             fill: fill.to_vec(),
             inner,
+            inner_transpose,
             index_crc,
             location,
         })
@@ -289,7 +293,7 @@ impl ShardingCodec {
                             actual: bytes.len(),
                         });
                     }
-                    let payload = self.inner.encode(bytes)?;
+                    let payload = self.encode_inner(bytes)?;
                     let base = match self.location {
                         IndexLocation::End => 0,
                         IndexLocation::Start => index_len,
@@ -423,7 +427,7 @@ impl ShardingCodec {
                 .ok_or_else(|| Error::InvalidSelection(format!("inner chunk {n} out of range")))?;
             let Some((off, len)) = entry else { continue };
             let stored = read(off, len)?;
-            let decoded = self.inner.decode(&stored)?;
+            let decoded = self.decode_inner(&stored)?;
             if decoded.len() != self.inner_bytes() {
                 return Err(Error::SizeMismatch {
                     expected: self.inner_bytes(),
@@ -493,7 +497,7 @@ impl ShardingCodec {
             None => Ok(None),
             Some((off, len)) => {
                 let bytes = &shard[off as usize..(off + len) as usize];
-                let decoded = self.inner.decode(bytes)?;
+                let decoded = self.decode_inner(bytes)?;
                 if decoded.len() != self.inner_bytes() {
                     return Err(Error::SizeMismatch {
                         expected: self.inner_bytes(),
@@ -502,6 +506,25 @@ impl ShardingCodec {
                 }
                 Ok(Some(decoded))
             }
+        }
+    }
+
+    /// Encodes one inner chunk given in C order: the inner transpose (if any)
+    /// first, then the inner chain.
+    fn encode_inner(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        match &self.inner_transpose {
+            Some(t) => self.inner.encode(&t.encode(bytes)?),
+            None => self.inner.encode(bytes),
+        }
+    }
+
+    /// Decodes one stored inner chunk to C-order element bytes: the inner chain,
+    /// then the inverse inner transpose (if any).
+    fn decode_inner(&self, stored: &[u8]) -> Result<Vec<u8>> {
+        let decoded = self.inner.decode(stored)?;
+        match &self.inner_transpose {
+            Some(t) => t.decode(&decoded),
+            None => Ok(decoded),
         }
     }
 
@@ -576,14 +599,23 @@ fn endian_of(cfg: &Value) -> Result<Endian> {
 }
 
 /// Builds the inner bytes-to-bytes chain from the `codecs` option.
-fn build_inner(config: &Value, dtype: &DType, registry: &Registry) -> Result<Pipeline> {
+fn build_inner(
+    config: &Value,
+    inner_shape: &[u64],
+    dtype: &DType,
+    registry: &Registry,
+) -> Result<(Pipeline, Option<TransposeCodec>)> {
     let specs = match config.get("codecs") {
-        None | Some(Value::Null) => return Ok(Pipeline::empty()),
+        None | Some(Value::Null) => return Ok((Pipeline::empty(), None)),
         Some(v) => v
             .as_array()
             .ok_or_else(|| Error::InvalidMetadata("sharding codecs must be an array".into()))?,
     };
     let mut codecs: Vec<Box<dyn Codec>> = Vec::new();
+    let mut transpose = None;
+    // Array-to-array codecs come first in the chain; `past_array_stage` is set
+    // by the first codec of a later stage.
+    let mut past_array_stage = false;
     for c in specs {
         let name = c
             .get("name")
@@ -591,22 +623,34 @@ fn build_inner(config: &Value, dtype: &DType, registry: &Registry) -> Result<Pip
             .ok_or_else(|| Error::InvalidMetadata("inner codec needs a name".into()))?;
         let cfg = c.get("configuration").cloned().unwrap_or_else(|| json!({}));
         match name {
+            "transpose" => {
+                if past_array_stage || transpose.is_some() {
+                    return Err(Error::InvalidMetadata(
+                        "inner transpose must be the only array-to-array codec, before the bytes codec".into(),
+                    ));
+                }
+                transpose = Some(TransposeCodec::new(&cfg, inner_shape, dtype.item_size())?);
+            }
             "bytes" => {
+                past_array_stage = true;
                 if dtype.item_size() > 1 && endian_of(&cfg)? != dtype.endian() {
                     return Err(Error::Unsupported(
                         "sharding inner bytes codec with a different byte order".into(),
                     ));
                 }
             }
-            "transpose" | "sharding_indexed" => {
+            "sharding_indexed" => {
                 return Err(Error::Unsupported(format!(
                     "'{name}' inside a sharding inner chain"
                 )));
             }
-            _ => codecs.push(registry.build(name, &cfg, dtype)?),
+            _ => {
+                past_array_stage = true;
+                codecs.push(registry.build(name, &cfg, dtype)?);
+            }
         }
     }
-    Ok(Pipeline::new(codecs))
+    Ok((Pipeline::new(codecs), transpose))
 }
 
 impl Codec for ShardingCodec {
@@ -655,9 +699,7 @@ impl Codec for ShardingCodec {
         let zero = vec![0u64; self.grid.len()];
         for (n, entry) in idx.entries().iter().enumerate() {
             let Some((off, len)) = *entry else { continue };
-            let decoded = self
-                .inner
-                .decode(&input[off as usize..(off + len) as usize])?;
+            let decoded = self.decode_inner(&input[off as usize..(off + len) as usize])?;
             if decoded.len() != self.inner_bytes() {
                 return Err(Error::SizeMismatch {
                     expected: self.inner_bytes(),

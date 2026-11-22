@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use crate::cache::ChunkCache;
 use crate::codec::sharding::ShardingCodec;
-use crate::codec::{Pipeline, Registry};
+use crate::codec::transpose::TransposeCodec;
+use crate::codec::{Codec, Pipeline, Registry};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::fill::FillValue;
@@ -36,7 +37,7 @@ pub struct Array {
     /// The sharding codec, when the chunk pipeline is exactly one
     /// `sharding_indexed` codec. Reads then fetch only the index and the inner
     /// chunks a selection needs.
-    shard: Option<ShardingCodec>,
+    shard: Option<ShardRead>,
     /// Decoded-chunk cache, present only when enabled (`std` feature: the
     /// mutex that makes the handle `Sync` needs `std`).
     #[cfg(feature = "std")]
@@ -270,16 +271,23 @@ impl Array {
     /// chunks in `selections`. Bypasses the chunk cache.
     fn read_shard_partial(
         &self,
-        shard: &ShardingCodec,
+        shard: &ShardRead,
         coord: &[u64],
         selections: &[(u64, u64, u64)],
     ) -> Result<Option<Vec<u8>>> {
+        let codec = &shard.codec;
+        // With a transpose before the shard, the stored shard is in permuted
+        // axis order: stored axis k is chunk axis order[k].
+        let stored: Vec<(u64, u64, u64)> = match &shard.transpose {
+            Some(t) => t.order().iter().map(|&d| selections[d]).collect(),
+            None => selections.to_vec(),
+        };
         self.grid.check_coord(coord)?;
         let key = self.chunk_key(coord);
         let Some(size) = self.store.size(&key)? else {
             return Ok(None);
         };
-        let il = shard.index_size() as u64;
+        let il = codec.index_size() as u64;
         if size < il {
             return Err(Error::Codec(
                 "sharding: shard shorter than its index".into(),
@@ -287,15 +295,15 @@ impl Array {
         }
         let index_bytes = self
             .store
-            .get_range(&key, shard.index_offset(size)?, il)?
+            .get_range(&key, codec.index_offset(size)?, il)?
             .ok_or_else(|| Error::NotFound(format!("shard index '{key}'")))?;
         if index_bytes.len() as u64 != il {
             return Err(Error::Codec(
                 "sharding: short read of the shard index".into(),
             ));
         }
-        let index = shard.parse_index_section(&index_bytes, size as usize)?;
-        let wanted = shard.inner_indices_touched(selections)?;
+        let index = codec.parse_index_section(&index_bytes, size as usize)?;
+        let wanted = codec.inner_indices_touched(&stored)?;
         // Fetch the stored inner chunks with as few requests as possible:
         // nearby ranges are merged, and each read is then sliced from a fetched
         // range.
@@ -318,7 +326,7 @@ impl Array {
                 Ok((start, v))
             })
             .collect::<Result<_>>()?;
-        let bytes = shard.decode_selected(&index, &wanted, |off, len| {
+        let bytes = codec.decode_selected(&index, &wanted, |off, len| {
             let (start, buf) = fetched
                 .iter()
                 .find(|(s, b)| *s <= off && off + len <= *s + b.len() as u64)
@@ -326,7 +334,10 @@ impl Array {
             let from = (off - start) as usize;
             Ok(buf[from..from + len as usize].to_vec())
         })?;
-        Ok(Some(bytes))
+        Ok(Some(match &shard.transpose {
+            Some(t) => t.decode(&bytes)?,
+            None => bytes,
+        }))
     }
 
     /// Reads a selection into a new byte buffer in C order. Returns the output
@@ -473,20 +484,37 @@ pub(crate) fn coalesce_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, 
     out
 }
 
-/// The sharding codec of `meta`, when its only codec is `sharding_indexed`.
-/// Any other pipeline (transpose, or bytes-to-bytes codecs around the shard)
-/// returns `None` and is read whole.
-fn shard_codec(meta: &ArrayMetadata, registry: &Registry) -> Result<Option<ShardingCodec>> {
+/// How a sharded array is read partially: the sharding codec of the stored
+/// shard, and the transpose that comes before it, if any.
+struct ShardRead {
+    codec: ShardingCodec,
+    transpose: Option<TransposeCodec>,
+}
+
+/// The shard read plan of `meta`, for the pipelines `sharding_indexed` alone and
+/// `transpose` followed by `sharding_indexed`. Other pipelines (bytes-to-bytes
+/// codecs around the shard) return `None` and are read whole.
+fn shard_codec(meta: &ArrayMetadata, registry: &Registry) -> Result<Option<ShardRead>> {
+    let fill = meta.fill_value.to_element_bytes(&meta.dtype)?;
     match meta.codecs.as_slice() {
-        [spec] if spec.name == "sharding_indexed" => {
-            let fill = meta.fill_value.to_element_bytes(&meta.dtype)?;
-            Ok(Some(ShardingCodec::new(
+        [spec] if spec.name == "sharding_indexed" => Ok(Some(ShardRead {
+            codec: ShardingCodec::new(
                 &spec.config,
                 &meta.chunk_shape,
                 &meta.dtype,
                 &fill,
                 registry,
-            )?))
+            )?,
+            transpose: None,
+        })),
+        [t, spec] if t.name == "transpose" && spec.name == "sharding_indexed" => {
+            let transpose =
+                TransposeCodec::new(&t.config, &meta.chunk_shape, meta.dtype.item_size())?;
+            let stored = transpose.output_shape();
+            Ok(Some(ShardRead {
+                codec: ShardingCodec::new(&spec.config, &stored, &meta.dtype, &fill, registry)?,
+                transpose: Some(transpose),
+            }))
         }
         _ => Ok(None),
     }
@@ -1001,6 +1029,65 @@ mod shard_read_tests {
         };
         let array = Array::create(store.clone(), "a", meta).unwrap();
         (store, array)
+    }
+
+    /// The shard fixture with a transpose before the sharding codec (outer
+    /// transpose, as zarr-python writes it).
+    const TRANSPOSED_SHARD_FIXTURE: &str = r#"{
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [8, 8],
+        "data_type": "float64",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [8, 8]}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0.0,
+        "codecs": [
+            {"name": "transpose", "configuration": {"order": [1, 0]}},
+            {"name": "sharding_indexed", "configuration": {
+                "chunk_shape": [2, 2],
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "index_codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "index_location": "end"
+            }}
+        ]
+    }"#;
+
+    #[test]
+    fn partial_read_through_an_outer_transpose_fetches_only_touched_chunks() {
+        let store = Arc::new(Counting {
+            inner: MemoryStore::new(),
+            bytes_read: AtomicU64::new(0),
+            requests: AtomicU64::new(0),
+        });
+        let NodeMetadata::Array(meta) = parse_node(TRANSPOSED_SHARD_FIXTURE.as_bytes()).unwrap()
+        else {
+            panic!("expected an array");
+        };
+        let array = Array::create(store.clone(), "a", meta).unwrap();
+        let data: Vec<f64> = (0..64).map(|i| i as f64 + 1.0).collect();
+        array.write_f64(&[], &data).unwrap();
+
+        // The values are the same as a full read, for a selection and for all data.
+        let (_, full) = array.read_bytes(&[]).unwrap();
+        let full: Vec<f64> = full
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(full, data);
+
+        store.bytes_read.store(0, Ordering::SeqCst);
+        let sel = [
+            Selection::Range(Slice::range(2, 4)),
+            Selection::Range(Slice::range(4, 6)),
+        ];
+        let got = array.read_f64(&sel).unwrap();
+        let expected: Vec<f64> = [(2, 4), (2, 5), (3, 4), (3, 5)]
+            .iter()
+            .map(|&(r, c)| data[r * 8 + c])
+            .collect();
+        assert_eq!(got, expected);
+        // Index (16 entries of 16 bytes) plus one 2x2 inner chunk, as without the transpose.
+        assert_eq!(store.bytes_read.load(Ordering::SeqCst), 16 * 16 + 4 * 8);
     }
 
     #[test]

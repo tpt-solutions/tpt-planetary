@@ -22,6 +22,8 @@
   "v3_bytes_zstd",
   "v3_partial_missing",
   "v3_sharded_f64",
+  "v3_sharded_inner_transpose",
+  "v3_sharded_outer_transpose_partial",
   "v3_transpose_bytes"
  ]
 }

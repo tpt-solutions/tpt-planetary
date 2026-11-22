@@ -153,6 +153,26 @@ def main():
         "float64",
     )
 
+    # Transpose inside the shard's inner chain (array-to-array before the bytes codec).
+    v3_array(
+        "v3_sharded_inner_transpose",
+        rng.normal(size=(8, 8)).astype("<f8"),
+        (8, 8),
+        [ShardingCodec(chunk_shape=(2, 4), codecs=[TransposeCodec(order=(1, 0)), BytesCodec(), GzipCodec(level=1)])],
+        0.0,
+        "float64",
+    )
+    # Transpose outside the shard, with missing inner chunks left at the fill value.
+    v3_array(
+        "v3_sharded_outer_transpose_partial",
+        rng.normal(size=(6, 8)).astype("<f8"),
+        (6, 8),
+        [TransposeCodec(order=(1, 0)), ShardingCodec(chunk_shape=(2, 2), codecs=[BytesCodec(), ZstdCodec(level=2)])],
+        0.0,
+        "float64",
+        partial=(slice(0, 4), slice(0, 8)),
+    )
+
     # A small index of what was generated, so the Rust test can check coverage.
     manifest = sorted(
         d for d in os.listdir(OUT) if os.path.isdir(os.path.join(OUT, d))
