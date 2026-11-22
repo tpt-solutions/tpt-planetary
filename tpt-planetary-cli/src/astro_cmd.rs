@@ -8,6 +8,12 @@
 //! degrees. Other frames and TDB are reported as not implemented (exit 3).
 
 use tpt_planetary_astro::frames::{Galactic, Icrs, MeanEcliptic, SkyCoord};
+use tpt_planetary_astro::nutation::{
+    TrueEclipticOfDate, icrs_to_true_ecliptic_of_date, true_ecliptic_of_date_to_icrs,
+};
+use tpt_planetary_astro::precession::{
+    MeanEclipticOfDate, icrs_to_mean_ecliptic_of_date, mean_ecliptic_of_date_to_icrs,
+};
 use tpt_planetary_core::Error as CoreError;
 use tpt_planetary_core::jd::JulianDate;
 use tpt_planetary_core::leap::EMBEDDED;
@@ -24,6 +30,10 @@ enum FrameName {
     Galactic,
     /// Mean ecliptic of J2000.
     Ecliptic,
+    /// Mean ecliptic and equinox of the epoch (needs `--epoch`).
+    MeanEclipticDate,
+    /// True ecliptic and equinox of the epoch, with nutation (needs `--epoch`).
+    TrueEclipticDate,
 }
 
 impl FrameName {
@@ -32,7 +42,17 @@ impl FrameName {
             FrameName::Icrs => "ICRS",
             FrameName::Galactic => "GALACTIC",
             FrameName::Ecliptic => "ECLIPTIC",
+            FrameName::MeanEclipticDate => "MEAN_ECLIPTIC_DATE",
+            FrameName::TrueEclipticDate => "TRUE_ECLIPTIC_DATE",
         }
+    }
+
+    /// True for frames whose transform depends on the epoch.
+    fn needs_epoch(self) -> bool {
+        matches!(
+            self,
+            FrameName::MeanEclipticDate | FrameName::TrueEclipticDate
+        )
     }
 }
 
@@ -42,6 +62,8 @@ fn frame_name(name: &str) -> Option<FrameName> {
         "icrs" => Some(FrameName::Icrs),
         "galactic" => Some(FrameName::Galactic),
         "ecliptic" => Some(FrameName::Ecliptic),
+        "ecliptic-date" => Some(FrameName::MeanEclipticDate),
+        "true-ecliptic-date" => Some(FrameName::TrueEclipticDate),
         _ => None,
     }
 }
@@ -65,19 +87,61 @@ fn parse_pair(value: &str) -> Result<(f64, f64), Failure> {
     Ok((lon, lat))
 }
 
-/// Converts a `LON,LAT` pair between two supported frames.
+/// The TT epoch as a two-part Julian date `(day, fraction)`, for frames that
+/// depend on time.
+fn require_epoch(epoch: Option<&str>) -> Result<(f64, f64), Failure> {
+    let text = epoch.ok_or_else(|| {
+        Failure::new(
+            EXIT_USAGE,
+            "this frame depends on time: give the epoch with --epoch (TT, ISO 8601)".to_string(),
+        )
+    })?;
+    let ct = parse_timestamp(text).map_err(|m| Failure::new(EXIT_USAGE, m))?;
+    let tt = Epoch::<Tt>::from_civil(ct).map_err(|e| core_failure("invalid --epoch", e))?;
+    let jd = tt.jd();
+    Ok((jd.day(), jd.fraction()))
+}
+
+/// Converts a `LON,LAT` pair between two supported frames. `epoch` is the TT
+/// epoch as a two-part Julian date, needed by the frames that depend on time.
 fn frame_convert(
     value: &str,
     from: FrameName,
     to: FrameName,
+    epoch: Option<(f64, f64)>,
     format: OutputFormat,
 ) -> Result<String, Failure> {
     let (lon, lat) = parse_pair(value)?;
+    let at = || {
+        epoch.ok_or_else(|| {
+            Failure::new(
+                EXIT_USAGE,
+                "this frame depends on time: give the epoch with --epoch (TT, ISO 8601)"
+                    .to_string(),
+            )
+        })
+    };
     let icrs: SkyCoord<Icrs> = match from {
         FrameName::Icrs => SkyCoord::from_degrees(lon, lat),
         FrameName::Galactic => SkyCoord::<Galactic>::from_degrees(lon, lat).transform_to::<Icrs>(),
         FrameName::Ecliptic => {
             SkyCoord::<MeanEcliptic>::from_degrees(lon, lat).transform_to::<Icrs>()
+        }
+        FrameName::MeanEclipticDate => {
+            let (hi, lo) = at()?;
+            mean_ecliptic_of_date_to_icrs(
+                SkyCoord::<MeanEclipticOfDate>::from_degrees(lon, lat),
+                hi,
+                lo,
+            )
+        }
+        FrameName::TrueEclipticDate => {
+            let (hi, lo) = at()?;
+            true_ecliptic_of_date_to_icrs(
+                SkyCoord::<TrueEclipticOfDate>::from_degrees(lon, lat),
+                hi,
+                lo,
+            )
         }
     };
     let (out_lon, out_lat) = match to {
@@ -88,6 +152,16 @@ fn frame_convert(
         }
         FrameName::Ecliptic => {
             let c = icrs.transform_to::<MeanEcliptic>();
+            (c.lon_deg(), c.lat_deg())
+        }
+        FrameName::MeanEclipticDate => {
+            let (hi, lo) = at()?;
+            let c = icrs_to_mean_ecliptic_of_date(icrs, hi, lo);
+            (c.lon_deg(), c.lat_deg())
+        }
+        FrameName::TrueEclipticDate => {
+            let (hi, lo) = at()?;
+            let c = icrs_to_true_ecliptic_of_date(icrs, hi, lo);
             (c.lon_deg(), c.lat_deg())
         }
     };
@@ -212,14 +286,34 @@ fn core_failure(context: &str, e: CoreError) -> Failure {
 }
 
 /// Runs the conversion and returns the text to print (without a final newline).
+#[cfg(test)]
 pub fn convert_command(
     value: &str,
     from: &str,
     to: &str,
     format: OutputFormat,
 ) -> Result<String, Failure> {
+    convert_command_at(value, from, to, None, format)
+}
+
+/// As `convert_command`, with an optional `epoch` (an ISO 8601 TT timestamp)
+/// for the frames that depend on time.
+pub fn convert_command_at(
+    value: &str,
+    from: &str,
+    to: &str,
+    epoch: Option<&str>,
+    format: OutputFormat,
+) -> Result<String, Failure> {
     match (frame_name(from), frame_name(to)) {
-        (Some(f), Some(t)) => return frame_convert(value, f, t, format),
+        (Some(f), Some(t)) => {
+            let at = if f.needs_epoch() || t.needs_epoch() {
+                Some(require_epoch(epoch)?)
+            } else {
+                None
+            };
+            return frame_convert(value, f, t, at, format);
+        }
         (Some(_), None) | (None, Some(_)) => {
             // Mixing a frame with a time scale: report the other side's error
             // if it is unknown or unimplemented, otherwise the mismatch.
@@ -269,6 +363,33 @@ pub fn convert_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_frames_need_an_epoch_and_round_trip() {
+        let no_epoch = convert_command("10,20", "icrs", "ecliptic-date", OutputFormat::Table);
+        assert_eq!(no_epoch.unwrap_err().code, EXIT_USAGE);
+        let at = Some("2024-06-01T12:00:00");
+        let date =
+            convert_command_at("10,20", "icrs", "ecliptic-date", at, OutputFormat::Table).unwrap();
+        let back = convert_command_at(
+            date.split(' ').next().unwrap(),
+            "ecliptic-date",
+            "icrs",
+            at,
+            OutputFormat::Table,
+        )
+        .unwrap();
+        let parse = |s: &str| -> (f64, f64) {
+            let mut it = s.split(' ').next().unwrap().split(',');
+            (
+                it.next().unwrap().parse().unwrap(),
+                it.next().unwrap().parse().unwrap(),
+            )
+        };
+        let (l0, b0) = parse("10,20");
+        let (l1, b1) = parse(&back);
+        assert!((l1 - l0).abs() < 1e-9 && (b1 - b0).abs() < 1e-9, "{back}");
+    }
 
     fn run(value: &str, from: &str, to: &str) -> String {
         convert_command(value, from, to, OutputFormat::Table).unwrap()

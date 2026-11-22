@@ -121,7 +121,7 @@ pub enum ArrayCommand {
         /// Repeat for each name used in the expression.
         #[arg(long = "input", value_name = "NAME=PATH")]
         inputs: Vec<String>,
-        /// Output Zarr array directory. Must not exist yet. Written as float64.
+        /// Output Zarr array directory, or a NetCDF-3 file if the name ends in .nc. Must not exist yet. Written as float64.
         #[arg(short, long)]
         output: String,
         /// Zarr format of the output: 2 or 3.
@@ -202,6 +202,10 @@ pub enum AstroCommand {
         /// Target time scale or frame.
         #[arg(long)]
         to: String,
+        /// TT epoch (ISO 8601) for the frames that depend on time, such as
+        /// `ecliptic-date` and `true-ecliptic-date`.
+        #[arg(long)]
+        epoch: Option<String>,
     },
 }
 
@@ -327,9 +331,18 @@ fn run(cli: Cli) -> ExitCode {
             )),
         },
         Command::Astro { action } => match action {
-            AstroCommand::Convert { value, from, to } => {
-                finish(astro_cmd::convert_command(&value, &from, &to, format))
-            }
+            AstroCommand::Convert {
+                value,
+                from,
+                to,
+                epoch,
+            } => finish(astro_cmd::convert_command_at(
+                &value,
+                &from,
+                &to,
+                epoch.as_deref(),
+                format,
+            )),
         },
         Command::Ephemeris { action } => match action {
             EphemerisCommand::Query {
