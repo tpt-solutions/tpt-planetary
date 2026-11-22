@@ -10,9 +10,10 @@ IAU 2006/2000A precession-nutation matrix (ERFA's pnm06a) before comparison.
 Like the astrometric test, this needs a DE440-style kernel in TPT_SPK_KERNEL and
 is skipped without one. Tolerance: 0.15 arcsec per coordinate. Horizons rounds
 to 1e-5 degree (0.036 arcsec); the measured maximum difference is 0.11 arcsec,
-at 1950, which is larger than the rounding alone. The classical first-order
-aberration used by the crate (no relativistic terms, about 0.002 arcsec) is part
-of the difference, and the comparison does not separate the two.
+at 1950. The aberration is ERFA's eraAb, which includes the relativistic terms,
+and it changed the residual by less than 0.001 arcsec. The remaining RA offset
+of about +0.05 arcsec is not explained by the aberration model; its source
+(frame, light-time or kernel) is not identified.
 """
 
 from __future__ import annotations
