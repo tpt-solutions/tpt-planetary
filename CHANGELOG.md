@@ -101,6 +101,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - UT1 in `tptplan astro convert` (`--eop FILE`, an IERS finals2000A file), checked
   against astropy's IERS-B values; interpolation across a gap of more than a day is
   an error.
+- Binary PCK orientation (`pck::orientation_matrix`): the J2000 to ITRF93 rotation from
+  a type-2 PCK, checked against SPICE's pxform.
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
   coefficients; matches `erfa.nut00b` to 1e-13 rad.
 - Atmospheric refraction for Alt/Az: the ERFA `refco` constants
