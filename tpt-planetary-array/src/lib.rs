@@ -67,6 +67,10 @@ pub mod retry;
 pub mod selection;
 pub mod store;
 
+/// Tabular bridge to tpt-strata (feature `strata`).
+#[cfg(feature = "strata")]
+pub mod strata;
+
 pub use array::Array;
 pub use dtype::{DType, Endian, Kind};
 pub use error::{Error, Result};

@@ -14,6 +14,9 @@ categories = ["science", "data-structures"]
 
 [features]
 default = ["std"]
+# Tabular bridge to tpt-strata (MIT OR Apache-2.0, no dependencies). Parquet is
+# not used: its Apache-2.0-only dependencies are outside the licence policy.
+strata = ["std", "dep:tpt-strata"]
 # Enables the in-memory and local-filesystem stores and std::error integration.
 std = []
 # Vectorised elementwise and reduction kernels via tpt-simd-vector (MIT OR Apache-2.0,
@@ -35,6 +38,8 @@ ruzstd = { version = "0.9.1", default-features = false, features = ["hash"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
 # JSON for Zarr metadata (MIT OR Apache-2.0).
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+# Columnar query engine for the tabular bridge (MIT OR Apache-2.0, no external dependencies).
+tpt-strata = { version = "0.1.0", optional = true }
 
 [lints]
 workspace = true
