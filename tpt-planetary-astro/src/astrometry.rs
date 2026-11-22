@@ -189,6 +189,34 @@ pub fn annual_aberration(
     from_cartesian(add(n, beta), coord)
 }
 
+/// 2GM(Sun)/c^2 in astronomical units (ERFA's `ERFA_SRS`), for the Sun-gravity
+/// term of relativistic aberration.
+pub const SRS_AU: f64 = 1.974_125_743_36e-8;
+
+/// Aberration of a natural (geometric) direction, as ERFA's `eraAb`: the classical
+/// first-order term, the Lorentz factor of the observer's speed, and the
+/// Sun-gravity term that depends on the Sun-observer distance.
+///
+/// `pnat` is the unit direction, `v` the observer's barycentric velocity divided
+/// by the speed of light, and `s` the Sun-observer distance in AU. Returns the
+/// unit direction in the observer's frame. This is the aberration that
+/// [`apparent_direction`](crate::ephemeris::apparent_direction) applies; it
+/// includes the relativistic terms that [`annual_aberration`] leaves out.
+#[must_use]
+pub fn aberration_erfa(pnat: [f64; 3], v: [f64; 3], s: f64) -> [f64; 3] {
+    let v2 = dot(v, v);
+    let bm1 = (1.0 - v2).sqrt();
+    let pdv = dot(pnat, v);
+    let w1 = 1.0 + pdv / (1.0 + bm1);
+    let w2 = SRS_AU / s;
+    let p = [
+        pnat[0] * bm1 + w1 * v[0] + w2 * (v[0] - pdv * pnat[0]),
+        pnat[1] * bm1 + w1 * v[1] + w2 * (v[1] - pdv * pnat[1]),
+        pnat[2] * bm1 + w1 * v[2] + w2 * (v[2] - pdv * pnat[2]),
+    ];
+    scale(p, 1.0 / norm(p))
+}
+
 /// Heliocentric longitude of the Earth (equinox J2000), true anomaly and
 /// eccentricity at a TT two-part Julian date, from low-precision elements.
 fn earth_orbit(tt_hi: f64, tt_lo: f64) -> (f64, f64, f64) {
@@ -399,5 +427,30 @@ mod tests {
         assert!((shift - 0.1).abs() < 1e-4, "shift {shift}");
         // No parallax, no change.
         assert_eq!(apply_parallax(star, 0.0, [0.0, 1.0, 0.0]), star);
+    }
+
+    #[test]
+    fn aberration_erfa_matches_erfa_ab() {
+        // Reference from erfa.ab (pyerfa 2.0.1.5) for this direction, velocity/c and distance.
+        let pnat = [
+            0.303_045_763_365_663_2,
+            -0.505_076_272_276_105_3,
+            0.808_122_035_641_768_7,
+        ];
+        let v = [1.0e-4, 9.0e-5, -2.0e-5];
+        let got = aberration_erfa(pnat, v, 1.02);
+        let want = [
+            0.303_155_252_223_404_7,
+            -0.505_002_083_015_190_7,
+            0.808_127_334_768_279_1,
+        ];
+        for k in 0..3 {
+            assert!(
+                (got[k] - want[k]).abs() < 1e-14,
+                "component {k}: {} vs {}",
+                got[k],
+                want[k]
+            );
+        }
     }
 }

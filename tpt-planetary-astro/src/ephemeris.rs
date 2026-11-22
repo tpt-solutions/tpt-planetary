@@ -708,7 +708,7 @@ pub fn apparent_direction(
     observer: i32,
     et: f64,
 ) -> Result<(crate::frames::SkyCoord<crate::frames::Icrs>, f64)> {
-    use crate::astrometry::{annual_aberration, light_deflection_by_sun};
+    use crate::astrometry::light_deflection_by_sun;
     use crate::frames::{Icrs, SkyCoord};
 
     let a = astrometric(spk, target, observer, et)?;
@@ -729,7 +729,13 @@ pub fn apparent_direction(
     ];
     let coord = SkyCoord::<Icrs>::from_radians(a.ra_rad, a.dec_rad);
     let deflected = light_deflection_by_sun(coord, helio);
-    let apparent = annual_aberration(deflected, v);
+    // ERFA's aberration takes the velocity in units of c and the Sun distance in AU.
+    let c_au_day = crate::astrometry::C_AU_PER_DAY;
+    let beta = [v[0] / c_au_day, v[1] / c_au_day, v[2] / c_au_day];
+    let s = (helio[0] * helio[0] + helio[1] * helio[1] + helio[2] * helio[2]).sqrt();
+    let pnat = deflected.to_unit_vector();
+    let apparent = SkyCoord::<Icrs>::from_vector(crate::astrometry::aberration_erfa(pnat, beta, s))
+        .unwrap_or(deflected);
     Ok((apparent, a.light_time_s))
 }
 
