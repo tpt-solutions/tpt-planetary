@@ -120,12 +120,22 @@ pub fn query(args: &QueryArgs<'_>, format: OutputFormat) -> Result<String, Failu
             apparent_direction(&spk, target, observer, et).map_err(|e| {
                 Failure::new(
                     EXIT_RUNTIME,
-                    format!("cannot compute the apparent direction of {target} from {observer}: {e}"),
+                    format!(
+                        "cannot compute the apparent direction of {target} from {observer}: {e}"
+                    ),
                 )
             })?;
         let ra = direction.lon();
         let dec = direction.lat();
-        return Ok(render_apparent(target, observer, &ct, ra, dec, light_time_s, format));
+        return Ok(render_apparent(
+            target,
+            observer,
+            &ct,
+            ra,
+            dec,
+            light_time_s,
+            format,
+        ));
     }
     if args.astrometric {
         let a = astrometric(&spk, target, observer, et).map_err(|e| {
@@ -264,6 +274,7 @@ mod tests {
             frame: "icrs",
             kernel,
             astrometric: false,
+            apparent: false,
         }
     }
 

@@ -7,6 +7,7 @@
 
 mod array_cmd;
 mod array_convert;
+mod array_index;
 mod array_math;
 mod astro_cmd;
 mod ephemeris_cmd;
@@ -127,6 +128,26 @@ pub enum ArrayCommand {
         /// Zarr format of the output: 2 or 3.
         #[arg(long, value_name = "2|3", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=3))]
         zarr_format: u8,
+    },
+    /// Climate index of a [time, lat, lon] Zarr field, computed lazily.
+    Index {
+        /// Index to compute: nino34 or nino34-relative.
+        index: String,
+        /// Local Zarr array directory of shape [time, lat, lon], monthly time steps.
+        #[arg(long)]
+        input: std::path::PathBuf,
+        /// First latitude of the grid, in degrees.
+        #[arg(long, allow_hyphen_values = true)]
+        lat_start: f64,
+        /// Latitude step, in degrees (positive: ascending grid).
+        #[arg(long)]
+        lat_step: f64,
+        /// First longitude of the grid, in degrees east.
+        #[arg(long)]
+        lon_start: f64,
+        /// Longitude step, in degrees (positive: ascending grid).
+        #[arg(long)]
+        lon_step: f64,
     },
     /// Convert between Zarr and NetCDF-3 (.nc).
     #[command(long_about = CONVERT_LONG_ABOUT)]
@@ -315,6 +336,27 @@ fn run(cli: Cli) -> ExitCode {
         },
         Command::Array { action } => match action {
             ArrayCommand::Inspect { uri } => finish(array_cmd::inspect(&uri, format, verbose)),
+            ArrayCommand::Index {
+                index,
+                input,
+                lat_start,
+                lat_step,
+                lon_start,
+                lon_step,
+            } => finish(array_index::IndexName::parse(&index).and_then(|name| {
+                array_index::index(
+                    name,
+                    &input,
+                    array_index::Grid {
+                        lat_start,
+                        lat_step,
+                        lon_start,
+                        lon_step,
+                    },
+                    format,
+                    verbose,
+                )
+            })),
             ArrayCommand::Math {
                 expression,
                 inputs,
