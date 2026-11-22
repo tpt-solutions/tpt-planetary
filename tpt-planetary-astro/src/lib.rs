@@ -31,7 +31,6 @@
 
 pub mod eop;
 pub mod fits;
-#[cfg(all(test, not(feature = "std")))]
 extern crate alloc;
 
 pub mod ephemeris;

@@ -43,8 +43,9 @@
 
 use core::fmt;
 
-#[cfg(feature = "std")]
-use std::vec::Vec;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// Size of a FITS logical block in bytes.
 const BLOCK: usize = 2880;
