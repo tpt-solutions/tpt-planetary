@@ -236,6 +236,10 @@ pub enum EphemerisCommand {
         /// no aberration) instead of the geometric ICRS state.
         #[arg(long)]
         astrometric: bool,
+        /// Print the apparent direction: the astrometric one with the Sun's light
+        /// deflection and the annual aberration applied (implies --astrometric).
+        #[arg(long)]
+        apparent: bool,
     },
 }
 
@@ -356,6 +360,7 @@ fn run(cli: Cli) -> ExitCode {
                 frame,
                 kernel,
                 astrometric,
+                apparent,
             } => finish(ephemeris_cmd::query(
                 &ephemeris_cmd::QueryArgs {
                     body: &body,
@@ -364,6 +369,7 @@ fn run(cli: Cli) -> ExitCode {
                     frame: &frame,
                     kernel: kernel.as_deref(),
                     astrometric,
+                    apparent,
                 },
                 format,
             )),

@@ -6,7 +6,8 @@
 use std::path::Path;
 
 use tpt_planetary_astro::ephemeris::{
-    Astrometric, SpkFile, StateVector, astrometric, et_from_tdb_jd, naif, read_file,
+    Astrometric, SpkFile, StateVector, apparent_direction, astrometric, et_from_tdb_jd, naif,
+    read_file,
 };
 use tpt_planetary_core::calendar::CalendarSystem;
 use tpt_planetary_core::jd::JulianDate;
@@ -70,6 +71,8 @@ pub struct QueryArgs<'a> {
     pub kernel: Option<&'a Path>,
     /// Print the astrometric RA and Dec instead of the geometric state.
     pub astrometric: bool,
+    /// Print the apparent RA and Dec (light deflection and aberration applied).
+    pub apparent: bool,
 }
 
 /// Runs the query and returns the text to print (without a final newline).
@@ -112,6 +115,18 @@ pub fn query(args: &QueryArgs<'_>, format: OutputFormat) -> Result<String, Failu
         )
     })?;
     let et = et_from_tdb_jd(jd.day(), jd.fraction());
+    if args.apparent {
+        let (direction, light_time_s) =
+            apparent_direction(&spk, target, observer, et).map_err(|e| {
+                Failure::new(
+                    EXIT_RUNTIME,
+                    format!("cannot compute the apparent direction of {target} from {observer}: {e}"),
+                )
+            })?;
+        let ra = direction.lon();
+        let dec = direction.lat();
+        return Ok(render_apparent(target, observer, &ct, ra, dec, light_time_s, format));
+    }
     if args.astrometric {
         let a = astrometric(&spk, target, observer, et).map_err(|e| {
             Failure::new(
@@ -131,6 +146,42 @@ pub fn query(args: &QueryArgs<'_>, format: OutputFormat) -> Result<String, Failu
     })?;
 
     Ok(render(target, observer, &ct, &state, format))
+}
+
+fn render_apparent(
+    target: i32,
+    observer: i32,
+    ct: &CivilTime,
+    ra: f64,
+    dec: f64,
+    light_time_s: f64,
+    format: OutputFormat,
+) -> String {
+    let epoch = format_timestamp(ct);
+    let ra_deg = ra.to_degrees();
+    let dec_deg = dec.to_degrees();
+    match format {
+        OutputFormat::Table => {
+            let label = |id: i32| known_name(id).map_or(String::new(), |n| format!(" ({n})"));
+            format!(
+                "target: {target}{}\nobserver: {observer}{}\nframe: icrs (apparent)\n\
+                 epoch: {epoch} TDB\nright ascension deg: {ra_deg}\ndeclination deg: {dec_deg}\n\
+                 light time s: {light_time_s}",
+                label(target),
+                label(observer),
+            )
+        }
+        OutputFormat::Json => json::object(&[
+            ("target_naif_id", target.to_string()),
+            ("observer_naif_id", observer.to_string()),
+            ("frame", json::string("icrs")),
+            ("correction", json::string("apparent")),
+            ("epoch_tdb", json::string(&epoch)),
+            ("ra_deg", ra_deg.to_string()),
+            ("dec_deg", dec_deg.to_string()),
+            ("light_time_s", light_time_s.to_string()),
+        ]),
+    }
 }
 
 fn render_astrometric(

@@ -687,6 +687,52 @@ pub fn astrometric(spk: &SpkFile<'_>, target: i32, observer: i32, et: f64) -> Re
     })
 }
 
+/// Apparent direction of `target` seen from `observer` at `et`: the
+/// astrometric direction (see [`astrometric`]) with the deflection of light by
+/// the Sun and the annual aberration applied, in that order, as in ERFA's
+/// `atciq`. The observer's velocity and heliocentric position come from the
+/// kernel, so the Earth's motion is the kernel's, not a model's.
+///
+/// Returns the direction in ICRS axes and the one-way light time in seconds.
+///
+/// Relative to JPL Horizons' apparent quantities this is a geocentric ICRF
+/// direction; its agreement is checked by the validation suite.
+///
+/// # Errors
+///
+/// Propagates ephemeris lookup and evaluation errors.
+#[cfg(feature = "std")]
+pub fn apparent_direction(
+    spk: &SpkFile<'_>,
+    target: i32,
+    observer: i32,
+    et: f64,
+) -> Result<(crate::frames::SkyCoord<crate::frames::Icrs>, f64)> {
+    use crate::astrometry::{annual_aberration, light_deflection_by_sun};
+    use crate::frames::{Icrs, SkyCoord};
+
+    let a = astrometric(spk, target, observer, et)?;
+    let obs = spk.state(observer, naif::SSB, et)?;
+    let sun = spk.state(observer, naif::SUN, et)?;
+    let km_to_au = 1.0 / AU_KM;
+    let day = 86_400.0;
+    // Observer velocity in AU/day, and heliocentric position in AU.
+    let v = [
+        obs.velocity[0] * day * km_to_au,
+        obs.velocity[1] * day * km_to_au,
+        obs.velocity[2] * day * km_to_au,
+    ];
+    let helio = [
+        sun.position[0] * km_to_au,
+        sun.position[1] * km_to_au,
+        sun.position[2] * km_to_au,
+    ];
+    let coord = SkyCoord::<Icrs>::from_radians(a.ra_rad, a.dec_rad);
+    let deflected = light_deflection_by_sun(coord, helio);
+    let apparent = annual_aberration(deflected, v);
+    Ok((apparent, a.light_time_s))
+}
+
 /// Earth-Sun distance in km from an SPK file (Sun to Earth geocentre).
 ///
 /// # Errors
