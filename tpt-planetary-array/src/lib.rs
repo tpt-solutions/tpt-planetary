@@ -57,6 +57,7 @@ pub mod dtype;
 pub mod error;
 pub mod fill;
 pub mod grid;
+pub mod hdf5;
 pub mod hierarchy;
 pub mod lazy;
 pub mod meta;

@@ -21,6 +21,7 @@ dist/
 !tpt-planetary-array/src/netcdf3/testdata/*.nc
 !tpt-planetary-array/tests/fixtures/netcdf3/*.nc
 *.h5
+!tpt-planetary-array/tests/fixtures/hdf5/*.h5
 *.hdf5
 *.zarr/
 data/
