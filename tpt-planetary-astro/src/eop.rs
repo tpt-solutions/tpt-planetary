@@ -132,6 +132,12 @@ pub enum EopError {
         /// The MJD that was requested.
         mjd: f64,
     },
+    /// The rows on either side of the requested epoch are more than one day
+    /// apart, so the epoch cannot be interpolated from daily values.
+    Gap {
+        /// The MJD that was requested.
+        mjd: f64,
+    },
 }
 
 impl fmt::Display for EopError {
@@ -149,6 +155,12 @@ impl fmt::Display for EopError {
             }
             EopError::OutOfRange { mjd } => {
                 write!(f, "MJD {mjd} lies outside the EOP table range")
+            }
+            EopError::Gap { mjd } => {
+                write!(
+                    f,
+                    "MJD {mjd} lies in a gap of more than one day in the EOP table"
+                )
             }
         }
     }
@@ -302,10 +314,14 @@ impl<'a> EopTable<'a> {
             return Ok(value(&rec[0]));
         }
         let i = match rec.binary_search_by(|r| r.mjd.total_cmp(&mjd)) {
-            Ok(i) => i.min(n - 2),
+            Ok(i) => return Ok(value(&rec[i])),
             Err(i) => i.saturating_sub(1).min(n - 2),
         };
         let (a, b) = (&rec[i], &rec[i + 1]);
+        // finals2000A has one row per day; a wider gap is not interpolated.
+        if b.mjd - a.mjd > 1.0 + 1e-9 {
+            return Err(EopError::Gap { mjd });
+        }
         let t = (mjd - a.mjd) / (b.mjd - a.mjd);
         let (va, vb) = (value(a), value(b));
         Ok(va + t * (vb - va))
@@ -504,23 +520,48 @@ mod tests {
         assert_eq!(rec.lod_ms, None);
     }
 
-    fn two_row_table() -> [EopRecord; 2] {
+    /// Three daily rows (finals2000A spacing). UT1-UTC runs 0.2, 0.4, 0.6 s;
+    /// xp runs 0.10, 0.15, 0.20 and yp 0.30, 0.20, 0.10 arcseconds.
+    fn two_row_table() -> [EopRecord; 3] {
+        let row = |mjd, xp, yp, dut1| EopRecord {
+            mjd,
+            xp_arcsec: xp,
+            yp_arcsec: yp,
+            dut1_seconds: dut1,
+            lod_ms: None,
+        };
         [
+            row(59000.0, 0.10, 0.30, 0.2),
+            row(59001.0, 0.15, 0.20, 0.4),
+            row(59002.0, 0.20, 0.10, 0.6),
+        ]
+    }
+
+    #[test]
+    fn rows_more_than_a_day_apart_are_not_interpolated() {
+        let rows = [
             EopRecord {
                 mjd: 59000.0,
-                xp_arcsec: 0.10,
-                yp_arcsec: 0.30,
+                xp_arcsec: 0.1,
+                yp_arcsec: 0.1,
                 dut1_seconds: 0.2,
                 lod_ms: None,
             },
             EopRecord {
                 mjd: 59002.0,
-                xp_arcsec: 0.20,
-                yp_arcsec: 0.10,
+                xp_arcsec: 0.2,
+                yp_arcsec: 0.2,
                 dut1_seconds: 0.6,
                 lod_ms: None,
             },
-        ]
+        ];
+        let table = EopTable::new(&rows).unwrap();
+        assert_eq!(
+            table.ut1_minus_utc(59001.0),
+            Err(EopError::Gap { mjd: 59001.0 })
+        );
+        // Exactly on a row is still fine.
+        assert!((table.ut1_minus_utc(59002.0).unwrap() - 0.6).abs() < 1e-15);
     }
 
     #[test]
@@ -532,7 +573,7 @@ mod tests {
         assert!((table.ut1_minus_utc(59002.0).unwrap() - 0.6).abs() < 1e-15);
         let (xp, yp) = table.polar_motion_arcsec(59001.5).unwrap();
         assert!((xp - 0.175).abs() < 1e-15);
-        // yp goes 0.30 -> 0.10; at 0.75 of the interval that is 0.15.
+        // yp is 0.20 at 59001 and 0.10 at 59002; halfway is 0.15.
         assert!((yp - 0.15).abs() < 1e-15);
     }
 
