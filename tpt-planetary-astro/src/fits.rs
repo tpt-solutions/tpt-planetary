@@ -425,6 +425,7 @@ pub struct Hdu<'a> {
     pixel_count: usize,
     bscale: f64,
     bzero: f64,
+    table: bool,
 }
 
 impl<'a> Hdu<'a> {
@@ -432,6 +433,12 @@ impl<'a> Hdu<'a> {
     #[must_use]
     pub fn header(&self) -> Header<'a> {
         self.header
+    }
+
+    /// True if this extension is a binary table (`XTENSION = 'BINTABLE'`).
+    #[must_use]
+    pub fn is_table(&self) -> bool {
+        self.table
     }
 
     /// Returns the data type.
@@ -691,15 +698,20 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
             ));
         }
         match first_card.value {
-            Some(Value::Text(t)) if t.trim_end() == "IMAGE" => {}
+            Some(Value::Text(t)) if t.trim_end() == "IMAGE" || t.trim_end() == "BINTABLE" => {}
             Some(Value::Text(_)) => {
                 return Err(FitsError::Unsupported(
-                    "XTENSION other than IMAGE (tables are not supported)",
+                    "XTENSION other than IMAGE and BINTABLE (ASCII tables are not supported)",
                 ));
             }
             _ => return Err(FitsError::InvalidHeader("XTENSION is not a string")),
         }
     }
+    let table = !first
+        && matches!(
+            header.get("XTENSION"),
+            Some(Value::Text(t)) if t.trim_end() == "BINTABLE"
+        );
 
     let bitpix = header
         .get("BITPIX")
@@ -760,6 +772,7 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
             pixel_count,
             bscale,
             bzero,
+            table,
         },
         used,
     ))
@@ -824,8 +837,9 @@ impl<'a> Iterator for Hdus<'a> {
 
 /// Iterates over every HDU in `bytes`: the primary HDU, then each extension.
 ///
-/// Table extensions yield an [`FitsError::Unsupported`] error and end the
-/// iteration. The primary HDU must be first.
+/// ASCII table extensions yield an [`FitsError::Unsupported`] error and end the
+/// iteration. Binary tables are yielded as HDUs; read them with [`Hdu::table`].
+/// The primary HDU must be first.
 #[must_use]
 pub fn hdus(bytes: &[u8]) -> Hdus<'_> {
     Hdus {
@@ -1295,6 +1309,301 @@ fn format_float(f: f64) -> Result<String> {
     Ok(format!("{mant}E{sign}{:02}", exp.abs()))
 }
 
+/// The storage type of one column of a binary table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnKind {
+    /// `L`: logical, one byte per element (`T` or `F`).
+    Logical,
+    /// `B`: unsigned byte.
+    Byte,
+    /// `I`: 16-bit signed integer.
+    Short,
+    /// `J`: 32-bit signed integer.
+    Int,
+    /// `K`: 64-bit signed integer.
+    Long,
+    /// `E`: 32-bit float.
+    Float,
+    /// `D`: 64-bit float.
+    Double,
+    /// `A`: character string, `repeat` bytes per row.
+    Char,
+    /// A form this module does not read (bit, complex, variable-length, ...).
+    Other(char),
+}
+
+/// One column of a binary table, with the layout and scaling from its header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Column {
+    /// Column name (`TTYPEn`), or empty if the header has none.
+    pub name: String,
+    /// Storage type.
+    pub kind: ColumnKind,
+    /// Number of elements per row (for `A`, the number of bytes per row).
+    pub repeat: usize,
+    /// Byte offset of the column within a row.
+    offset: usize,
+    /// Physical value = `zero + scale * stored`.
+    scale: f64,
+    zero: f64,
+    /// Integer value that stands for an undefined element (`TNULLn`).
+    null: Option<i64>,
+}
+
+/// A binary table extension: rows of fixed-width columns.
+#[derive(Debug, Clone)]
+pub struct Table<'a> {
+    data: &'a [u8],
+    rows: usize,
+    row_bytes: usize,
+    columns: Vec<Column>,
+}
+
+/// Parses a `TFORMn` value into `(repeat, type code)`. The repeat count
+/// defaults to 1; a value such as `'10A'` gives `(10, 'A')`.
+fn parse_tform(text: &str) -> Option<(usize, char)> {
+    let t = text.trim();
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    let repeat = if digits == 0 {
+        1
+    } else {
+        t[..digits].parse().ok()?
+    };
+    let code = t[digits..].chars().next()?;
+    Some((repeat, code))
+}
+
+/// Column kind and bytes per element of a `TFORM` type code.
+fn element_kind(code: char) -> (ColumnKind, usize) {
+    match code {
+        'L' => (ColumnKind::Logical, 1),
+        'B' => (ColumnKind::Byte, 1),
+        'I' => (ColumnKind::Short, 2),
+        'J' => (ColumnKind::Int, 4),
+        'K' => (ColumnKind::Long, 8),
+        'E' => (ColumnKind::Float, 4),
+        'D' => (ColumnKind::Double, 8),
+        'A' => (ColumnKind::Char, 1),
+        other => (ColumnKind::Other(other), 0),
+    }
+}
+
+fn text_value(v: Value<'_>) -> Option<&str> {
+    match v {
+        Value::Text(t) => Some(t),
+        _ => None,
+    }
+}
+
+impl<'a> Hdu<'a> {
+    /// Reads this binary table extension.
+    ///
+    /// Fails with [`FitsError::InvalidHeader`] if the HDU is not a table or a
+    /// column description is inconsistent with `NAXIS1`, and with
+    /// [`FitsError::Unsupported`] for column forms other than the fixed-width
+    /// ones (`L`, `B`, `I`, `J`, `K`, `E`, `D`, `A`).
+    pub fn table(&self) -> Result<Table<'a>> {
+        if !self.table {
+            return Err(FitsError::InvalidHeader("the HDU is not a binary table"));
+        }
+        let header = self.header;
+        let row_bytes = header
+            .get("NAXIS1")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("NAXIS1 (row width) missing"))?;
+        let rows = header
+            .get("NAXIS2")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("NAXIS2 (row count) missing"))?;
+        let fields = header
+            .get("TFIELDS")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("TFIELDS missing"))?;
+        let table_len = rows
+            .checked_mul(row_bytes)
+            .ok_or(FitsError::InvalidHeader("table size overflows"))?;
+        if table_len > self.data.len() {
+            return Err(FitsError::Truncated(
+                "table data is shorter than NAXIS1 x NAXIS2",
+            ));
+        }
+
+        let mut columns = Vec::with_capacity(fields);
+        let mut offset = 0usize;
+        for n in 1..=fields {
+            let form = header
+                .get(&format!("TFORM{n}"))
+                .and_then(|v| text_value(v))
+                .ok_or(FitsError::InvalidHeader("TFORMn missing or not a string"))?;
+            let (repeat, code) =
+                parse_tform(form).ok_or(FitsError::InvalidHeader("TFORMn is malformed"))?;
+            let (kind, size) = element_kind(code);
+            if let ColumnKind::Other(_) = kind {
+                return Err(FitsError::Unsupported(
+                    "this TFORM type (only L, B, I, J, K, E, D and A are read)",
+                ));
+            }
+            let width = if kind == ColumnKind::Char {
+                repeat
+            } else {
+                size * repeat
+            };
+            let name = header
+                .get(&format!("TTYPE{n}"))
+                .and_then(|v| text_value(v))
+                .map(|t| t.trim_end().to_string())
+                .unwrap_or_default();
+            let scale = header
+                .get(&format!("TSCAL{n}"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            let zero = header
+                .get(&format!("TZERO{n}"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let null = header.get(&format!("TNULL{n}")).and_then(|v| v.as_i64());
+            columns.push(Column {
+                name,
+                kind,
+                repeat,
+                offset,
+                scale,
+                zero,
+                null,
+            });
+            offset += width;
+        }
+        if offset > row_bytes {
+            return Err(FitsError::InvalidHeader(
+                "the columns are wider than NAXIS1",
+            ));
+        }
+        Ok(Table {
+            data: &self.data[..table_len],
+            rows,
+            row_bytes,
+            columns,
+        })
+    }
+}
+
+impl<'a> Table<'a> {
+    /// Number of rows.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Bytes per row (`NAXIS1`).
+    #[must_use]
+    pub fn row_bytes(&self) -> usize {
+        self.row_bytes
+    }
+
+    /// The columns, in file order.
+    #[must_use]
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    /// The column called `name`, if there is one.
+    #[must_use]
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Values of a numeric or logical column as `f64`, row by row. A column
+    /// with `repeat > 1` gives `rows * repeat` values, row-major. Scaling
+    /// (`TSCALn`, `TZEROn`) is applied; undefined values (`TNULLn`, or a
+    /// logical that is neither `T` nor `F`) become NaN.
+    pub fn read_f64(&self, name: &str) -> Result<Vec<f64>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        let size = match col.kind {
+            ColumnKind::Logical | ColumnKind::Byte => 1,
+            ColumnKind::Short => 2,
+            ColumnKind::Int | ColumnKind::Float => 4,
+            ColumnKind::Long | ColumnKind::Double => 8,
+            ColumnKind::Char | ColumnKind::Other(_) => {
+                return Err(FitsError::Unsupported(
+                    "read_f64 needs a numeric or logical column",
+                ));
+            }
+        };
+        let mut out = Vec::with_capacity(self.rows * col.repeat);
+        for row in 0..self.rows {
+            let base = row * self.row_bytes + col.offset;
+            for k in 0..col.repeat {
+                let at = base + k * size;
+                out.push(decode_element(col, &self.data[at..at + size]));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Text of an `A` column, one string per row, with trailing spaces and NUL
+    /// bytes removed.
+    pub fn read_strings(&self, name: &str) -> Result<Vec<String>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        if col.kind != ColumnKind::Char {
+            return Err(FitsError::InvalidHeader("read_strings needs an A column"));
+        }
+        Ok((0..self.rows)
+            .map(|row| {
+                let at = row * self.row_bytes + col.offset;
+                let text: String = self.data[at..at + col.repeat]
+                    .iter()
+                    .map(|&b| char::from(b))
+                    .collect();
+                text.trim_end_matches([' ', '\0']).to_string()
+            })
+            .collect())
+    }
+}
+
+/// The physical value of one stored element of a numeric or logical column.
+fn decode_element(col: &Column, raw: &[u8]) -> f64 {
+    let integer = |v: i64| {
+        if col.null == Some(v) {
+            f64::NAN
+        } else {
+            col.zero + col.scale * v as f64
+        }
+    };
+    match col.kind {
+        ColumnKind::Logical => match raw[0] {
+            b'T' => 1.0,
+            b'F' => 0.0,
+            _ => f64::NAN,
+        },
+        ColumnKind::Byte => integer(i64::from(raw[0])),
+        ColumnKind::Short => integer(i64::from(i16::from_be_bytes([raw[0], raw[1]]))),
+        ColumnKind::Int => integer(i64::from(i32::from_be_bytes([
+            raw[0], raw[1], raw[2], raw[3],
+        ]))),
+        ColumnKind::Long => integer(i64::from_be_bytes([
+            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+        ])),
+        ColumnKind::Float => {
+            let v = f64::from(f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]));
+            col.zero + col.scale * v
+        }
+        ColumnKind::Double => {
+            let v = f64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ]);
+            col.zero + col.scale * v
+        }
+        ColumnKind::Char | ColumnKind::Other(_) => f64::NAN,
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "std")]
 mod tests {
@@ -1436,11 +1745,27 @@ mod tests {
     }
 
     #[test]
-    fn table_extension_is_rejected() {
+    fn table_extension_is_yielded_and_read() {
+        // BINTABLE is an HDU; its table() reading is tested in tests/fits_table.rs.
         let mut it = hdus(BINTABLE);
         assert!(it.next().unwrap().is_ok());
-        assert!(matches!(it.next(), Some(Err(FitsError::Unsupported(_)))));
+        let table = it.next().unwrap().unwrap();
+        assert!(table.is_table());
         assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn ascii_table_extension_is_rejected() {
+        // Same length as 'BINTABLE', so the header layout is unchanged.
+        let mut ascii = BINTABLE.to_vec();
+        let at = ascii
+            .windows(10)
+            .position(|w| w == b"'BINTABLE'")
+            .expect("XTENSION keyword");
+        ascii[at..at + 10].copy_from_slice(b"'TABLE   '");
+        let mut it = hdus(&ascii);
+        assert!(it.next().unwrap().is_ok());
+        assert!(matches!(it.next(), Some(Err(FitsError::Unsupported(_)))));
     }
 
     #[test]
