@@ -17,6 +17,9 @@ dist/
 # Data files (large datasets, ephemerides, Zarr stores)
 *.bsp
 *.nc
+# Small NetCDF test fixtures are needed by the tests
+!tpt-planetary-array/src/netcdf3/testdata/*.nc
+!tpt-planetary-array/tests/fixtures/netcdf3/*.nc
 *.h5
 *.hdf5
 *.zarr/
