@@ -33,7 +33,8 @@
 //! the whole Zarr path. The blosclz decoder and the don't-split flag (0x10) were
 //! fixed against those fixtures. Snappy is checked against the raw-format
 //! reference encoder (cramjam) in `codec/testdata`. The far-distance blosclz
-//! form is rejected as unsupported because it is not verified.
+//! form (distances above 8191) is checked against a python-blosc frame in
+//! `codec/testdata/blosclz_far.blosc`.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -141,8 +142,8 @@ impl BloscHeader {
 /// copied length is the sum plus 2, and the distance is the 13-bit value plus 1.
 ///
 /// Verified against the blosclz streams of zarr-python fixtures (see
-/// `tests/zarr_conformance.rs`). The 16-bit far-distance form, used for
-/// distances beyond 8191, is not verified and is rejected as unsupported.
+/// `tests/zarr_conformance.rs`), and against a python-blosc frame that uses the
+/// 16-bit far-distance form for distances beyond 8191.
 fn blosclz_decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
     let bad = || Error::Codec("blosc: malformed blosclz stream".into());
     let mut out: Vec<u8> = Vec::with_capacity(expected);
@@ -173,12 +174,17 @@ fn blosclz_decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             let code = *data.get(ip).ok_or_else(bad)? as usize;
             ip += 1;
             len += 2;
-            if code == 255 && ofs == 31 << 8 {
-                return Err(Error::Unsupported(
-                    "blosclz far back-reference (distance above 8191)".into(),
-                ));
-            }
-            let dist = ofs + code + 1;
+            // The 16-bit distance form (c-blosc's MAX_DISTANCE case): the offset is
+            // the big-endian pair that follows, and the distance is that value
+            // plus 8192.
+            let dist = if code == 255 && ofs == 31 << 8 {
+                let hi = *data.get(ip).ok_or_else(bad)? as usize;
+                let lo = *data.get(ip + 1).ok_or_else(bad)? as usize;
+                ip += 2;
+                ((hi << 8) | lo) + 8192
+            } else {
+                ofs + code + 1
+            };
             if dist > out.len() {
                 return Err(bad());
             }
@@ -1004,6 +1010,16 @@ mod numcodecs_reference_tests {
         check(
             include_bytes!("testdata/blosc_lz4_bitshuffle.blosc"),
             include_bytes!("testdata/blosc_lz4_bitshuffle.raw"),
+        );
+    }
+
+    #[test]
+    fn decodes_blosclz_far_distance_frame() {
+        // python-blosc output whose second half is matched 12600 bytes back, which
+        // needs the 16-bit distance form.
+        check(
+            include_bytes!("testdata/blosclz_far.blosc"),
+            include_bytes!("testdata/blosclz_far.raw"),
         );
     }
 
