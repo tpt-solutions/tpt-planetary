@@ -49,8 +49,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(astro::gmst_iau2006, m)?)?;
     m.add_class::<astro::Wcs>()?;
 
-    // Array: local Zarr v2/v3 directories and lazy reductions.
+    // Array: local Zarr v2/v3 directories, NetCDF-3 files and lazy reductions.
     m.add_class::<array::ZarrArray>()?;
     m.add_function(wrap_pyfunction!(array::open_zarr, m)?)?;
+    m.add_class::<array::NetCdf3File>()?;
+    m.add_function(wrap_pyfunction!(array::open_netcdf3, m)?)?;
     Ok(())
 }

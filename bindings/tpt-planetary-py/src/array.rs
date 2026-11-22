@@ -218,3 +218,74 @@ impl ZarrArray {
         )
     }
 }
+
+/// A NetCDF-3 file (classic or 64-bit offset) read into memory.
+///
+/// The file is read once when opened. Variables are decoded on each `read`, as
+/// float64 whatever their stored type.
+#[pyclass(name = "NetCdf3File", module = "tpt_planetary", frozen)]
+pub struct NetCdf3File {
+    bytes: Vec<u8>,
+}
+
+impl NetCdf3File {
+    fn reader(&self) -> PyResult<tpt_planetary_array::netcdf3::Reader<'_>> {
+        tpt_planetary_array::netcdf3::Reader::new(&self.bytes).map_err(array_error)
+    }
+}
+
+/// Opens the NetCDF-3 file at `path` and reads it into memory.
+///
+/// Raises `OSError` if the file cannot be read and `TptPlanetaryError` if it is
+/// not a NetCDF-3 file. NetCDF-4 (HDF5) files are not supported.
+#[pyfunction]
+pub fn open_netcdf3(path: PathBuf) -> PyResult<NetCdf3File> {
+    let bytes = std::fs::read(&path)?;
+    let file = NetCdf3File { bytes };
+    file.reader()?;
+    Ok(file)
+}
+
+#[pymethods]
+impl NetCdf3File {
+    /// Variable names, in file order.
+    #[getter]
+    fn variables(&self) -> PyResult<Vec<String>> {
+        Ok(self
+            .reader()?
+            .variables()
+            .iter()
+            .map(|v| v.name.clone())
+            .collect())
+    }
+
+    /// Dimension names and lengths as a dict, in file order. The unlimited
+    /// dimension reports its number of records.
+    #[getter]
+    fn dimensions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        for d in self.reader()?.dimensions() {
+            dict.set_item(&d.name, d.len)?;
+        }
+        Ok(dict)
+    }
+
+    /// Shape of variable `name` as a tuple of ints.
+    fn shape<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyTuple>> {
+        let shape = self.reader()?.shape(name).map_err(array_error)?;
+        PyTuple::new(py, shape)
+    }
+
+    /// Reads variable `name` into a new float64 NumPy array with the variable's
+    /// shape. A scalar variable gives a Python float.
+    fn read<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        let reader = self.reader()?;
+        let shape = reader.shape(name).map_err(array_error)?;
+        let data = reader.read_f64(name).map_err(array_error)?;
+        if shape.is_empty() {
+            let value = data.first().copied().unwrap_or(f64::NAN);
+            return Ok(value.into_pyobject(py)?.into_any());
+        }
+        Ok(data.into_pyarray(py).reshape(shape)?.into_any())
+    }
+}

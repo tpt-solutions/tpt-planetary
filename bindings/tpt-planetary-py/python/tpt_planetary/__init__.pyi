@@ -165,6 +165,38 @@ class ZarrArray:
     def min(self) -> float | None: ...
     def max(self) -> float | None: ...
 
+class NetCdf3File:
+    """A NetCDF-3 (classic or 64-bit offset) file read into memory.
+
+    Variables are read as float64. NetCDF-4 (HDF5) files are not supported.
+    """
+
+    @property
+    def variables(self) -> list[str]:
+        """Variable names, in file order."""
+        ...
+    @property
+    def dimensions(self) -> dict[str, int]:
+        """Dimension names and lengths; the unlimited dimension is its record count."""
+        ...
+    def shape(self, name: str) -> tuple[int, ...]:
+        """Shape of variable ``name``."""
+        ...
+    def read(self, name: str) -> NDArray[np.float64] | float:
+        """Read variable ``name`` as a float64 array of its shape (a float if scalar).
+
+        Raises FileNotFoundError for an unknown name.
+        """
+        ...
+
+def open_netcdf3(path: str | PathLike[str]) -> NetCdf3File:
+    """Open and read the NetCDF-3 file at ``path``.
+
+    Raises OSError if the file cannot be read and TptPlanetaryError if it is
+    not a NetCDF-3 file.
+    """
+    ...
+
 def open_zarr(path: str | PathLike[str]) -> ZarrArray:
     """Open the Zarr array in the local directory ``path``.
 
