@@ -248,9 +248,13 @@ fn output_path_rules_are_enforced() {
     );
     assert!(stderr(&out).contains("already exists"));
 
+    // A .nc output is a NetCDF-3 file with one variable named result.
     let out = run_math(&tmp, "a + b", "result.nc");
-    assert_eq!(code(&out), EXIT_USAGE);
-    assert!(stderr(&out).contains("must not end in .nc"));
+    assert_eq!(code(&out), EXIT_OK, "nc output: {}", stderr(&out));
+    let bytes = std::fs::read(tmp.root().join("result.nc")).expect("netcdf file");
+    assert_eq!(&bytes[..3], b"CDF");
+    let reader = tpt_planetary_array::netcdf3::Reader::new(&bytes).expect("parse");
+    assert_eq!(reader.shape("result").expect("shape").len(), 2);
 }
 
 #[test]

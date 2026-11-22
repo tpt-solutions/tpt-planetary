@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use tpt_planetary_array::lazy::{Block, Expr, NodeOp, Region};
 use tpt_planetary_array::meta::{ArrayMetadata, ZarrFormat};
+use tpt_planetary_array::netcdf3::{Format, NcType, Writer};
 use tpt_planetary_array::ops::ArithOp;
 use tpt_planetary_array::{Array, DType, FillValue, FsStore, Selection, Slice, Store};
 
@@ -526,7 +527,47 @@ fn write_result(expr: &Expr, output: &str, format: ZarrFormat) -> Result<u64, Fa
     Ok(written)
 }
 
-/// Evaluates `expression` over the named inputs and writes a Zarr array.
+/// Writes `expr` as a NetCDF-3 (classic) file at `output`, with one float64
+/// variable `result` and dimensions `dim0`, `dim1`, and so on. NetCDF-3 holds
+/// each variable in one piece, so the whole result is evaluated in memory.
+fn write_result_netcdf(expr: &Expr, output: &str) -> Result<u64, Failure> {
+    let shape = expr.shape();
+    let whole = Region {
+        start: vec![0; shape.len()],
+        count: shape.clone(),
+        step: vec![1; shape.len()],
+    };
+    let block = expr
+        .eval_region(&whole)
+        .map_err(|e| runtime(format!("evaluation failed: {e}")))?;
+    let values: Vec<f64> = block
+        .values
+        .iter()
+        .zip(&block.valid)
+        .map(|(&v, &ok)| if ok { v } else { f64::NAN })
+        .collect();
+    let mut writer = Writer::new(Format::Classic);
+    let mut dims = Vec::with_capacity(shape.len());
+    for (i, &n) in shape.iter().enumerate() {
+        let len = usize::try_from(n)
+            .map_err(|_| runtime(format!("axis {i} is too long for a NetCDF file")))?;
+        let id = writer
+            .add_dimension(&format!("dim{i}"), Some(len))
+            .map_err(|e| runtime(format!("cannot create dimension: {e}")))?;
+        dims.push(id);
+    }
+    writer
+        .add_variable_f64("result", &dims, Vec::new(), NcType::Double, &values)
+        .map_err(|e| runtime(format!("cannot create variable: {e}")))?;
+    let bytes = writer
+        .finish()
+        .map_err(|e| runtime(format!("cannot serialise NetCDF: {e}")))?;
+    std::fs::write(output, bytes).map_err(|e| runtime(format!("cannot write '{output}': {e}")))?;
+    Ok(values.len() as u64)
+}
+
+/// Evaluates `expression` over the named inputs and writes a Zarr array, or a
+/// NetCDF-3 file when the output name ends in `.nc`.
 /// Returns the summary line for stdout.
 pub fn math(
     expression: &str,
@@ -542,12 +583,7 @@ pub fn math(
         )
     })?;
     reject_remote(output)?;
-    if is_netcdf_path(output) {
-        return Err(Failure::new(
-            EXIT_USAGE,
-            "array math writes a Zarr array; the output must not end in .nc".to_string(),
-        ));
-    }
+    let to_netcdf = is_netcdf_path(output);
     let mut used = Vec::new();
     names(&ast, &mut used);
     let opened = open_inputs(inputs)?;
@@ -573,6 +609,14 @@ pub fn math(
     };
     if verbose > 0 {
         eprintln!("tptplan: evaluating {:?} over {:?}", result.shape(), used);
+    }
+    if to_netcdf {
+        let values = write_result_netcdf(&result, output)?;
+        return Ok(format!(
+            "wrote {} with shape {:?} ({values} values, NetCDF-3)",
+            output,
+            result.shape()
+        ));
     }
     let chunks = write_result(&result, output, zarr_format(version))?;
     Ok(format!(

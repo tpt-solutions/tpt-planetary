@@ -1,14 +1,19 @@
 //! `tptplan array inspect`: shape, dtype, chunking and attributes of a local
 //! Zarr v2 or v3 array directory.
 //!
-//! Remote locations (`s3://`, `https://`, any other `scheme://`) are not
-//! supported in this build and return exit 3. `array convert` and `array math`
-//! are not implemented and are reported from `main.rs`.
+//! Locations are local directories, `http://` URLs, or `s3://bucket/key` URLs.
+//! `s3://` needs an S3 endpoint over plain HTTP, given in `TPT_S3_ENDPOINT`
+//! (for example `http://127.0.0.1:9000`), and reads credentials from the
+//! `AWS_*` environment variables when they are set; the region comes from
+//! `AWS_REGION` or `AWS_DEFAULT_REGION`, and defaults to `us-east-1`. `https://`
+//! and other schemes return exit 3: no TLS is built in. `array convert` and
+//! `array math` are reported from `main.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tpt_planetary_array::meta::{ArrayMetadata, NodeMetadata, ZarrFormat};
+use tpt_planetary_array::store::{Credentials, HttpStore, S3Store};
 use tpt_planetary_array::{Array, FsStore, Store, hierarchy};
 
 use crate::json;
@@ -37,6 +42,59 @@ fn display_path(path: &Path) -> String {
     match s.strip_prefix(r"\\?\") {
         Some(rest) => rest.to_string(),
         None => s,
+    }
+}
+
+/// Splits a remote URL into the store holding its parent directory and the
+/// node name (the last path segment). `http://` and `s3://` are supported.
+fn remote_store(uri: &str, scheme: &str) -> Result<(Arc<dyn Store>, String), Failure> {
+    let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or_default();
+    let (location, name) = match rest.trim_end_matches('/').rsplit_once('/') {
+        Some((loc, name)) if !name.is_empty() => (loc.to_string(), name.to_string()),
+        _ => {
+            return Err(Failure::new(
+                EXIT_USAGE,
+                format!("'{uri}' does not name an array: expected {scheme}://.../name"),
+            ));
+        }
+    };
+    match scheme {
+        "http" => {
+            let store = HttpStore::new(&format!("http://{location}/"))
+                .map_err(|e| Failure::new(EXIT_USAGE, format!("cannot use '{uri}': {e}")))?;
+            Ok((Arc::new(store), name))
+        }
+        "s3" => {
+            let (bucket, prefix) = match location.split_once('/') {
+                Some((b, p)) => (b.to_string(), p.to_string()),
+                None => (location.clone(), String::new()),
+            };
+            let endpoint = std::env::var("TPT_S3_ENDPOINT").map_err(|_| {
+                Failure::new(
+                    EXIT_USAGE,
+                    "s3:// locations need TPT_S3_ENDPOINT set to an http:// endpoint \
+                     (no TLS is built in)"
+                        .to_string(),
+                )
+            })?;
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .unwrap_or_else(|_| "us-east-1".to_string());
+            let mut store = S3Store::new(&endpoint, &bucket, &region)
+                .map_err(|e| Failure::new(EXIT_USAGE, format!("cannot use '{uri}': {e}")))?
+                .with_prefix(&prefix);
+            if let Some(creds) = Credentials::from_env() {
+                store = store.with_credentials(creds);
+            }
+            Ok((Arc::new(store), name))
+        }
+        other => Err(Failure::new(
+            EXIT_NOT_IMPLEMENTED,
+            format!(
+                "'{other}://' locations are not supported in this build (no TLS); \
+                 use a local path, http:// or s3://"
+            ),
+        )),
     }
 }
 
@@ -87,13 +145,9 @@ pub(crate) fn default_chunks(shape: &[u64]) -> Vec<u64> {
 pub fn inspect(uri: &str, format: OutputFormat, verbose: u8) -> Result<String, Failure> {
     stage(verbose, "checking location");
     if let Some(scheme) = uri_scheme(uri) {
-        return Err(Failure::new(
-            EXIT_NOT_IMPLEMENTED,
-            format!(
-                "'{scheme}://' locations are not supported in this build; \
-                 only local Zarr array directories can be inspected"
-            ),
-        ));
+        stage(verbose, "opening remote store");
+        let (store, name) = remote_store(uri, scheme)?;
+        return inspect_in_store(store, &name, uri, format, verbose);
     }
 
     stage(verbose, "resolving local path");
@@ -123,7 +177,18 @@ pub fn inspect(uri: &str, format: OutputFormat, verbose: u8) -> Result<String, F
     let store = FsStore::open(parent)
         .map_err(|e| Failure::new(EXIT_RUNTIME, format!("cannot open store: {e}")))?;
     let store: Arc<dyn Store> = Arc::new(store);
+    inspect_in_store(store, name, &display_path(&abs), format, verbose)
+}
 
+/// Reads the metadata of array `name` from `store` and renders it. `display`
+/// is the location shown in the output.
+fn inspect_in_store(
+    store: Arc<dyn Store>,
+    name: &str,
+    display: &str,
+    format: OutputFormat,
+    verbose: u8,
+) -> Result<String, Failure> {
     stage(
         verbose,
         "reading node metadata (zarr.json, .zarray or .zgroup)",
@@ -135,13 +200,13 @@ pub fn inspect(uri: &str, format: OutputFormat, verbose: u8) -> Result<String, F
         Some(NodeMetadata::Group(_)) => {
             return Err(Failure::new(
                 EXIT_RUNTIME,
-                format!("'{uri}' is a Zarr group, not an array"),
+                format!("'{display}' is a Zarr group, not an array"),
             ));
         }
         None => {
             return Err(Failure::new(
                 EXIT_RUNTIME,
-                format!("'{uri}' has no Zarr metadata (zarr.json, .zarray or .zgroup)"),
+                format!("'{display}' has no Zarr metadata (zarr.json, .zarray or .zgroup)"),
             ));
         }
     }
@@ -151,11 +216,10 @@ pub fn inspect(uri: &str, format: OutputFormat, verbose: u8) -> Result<String, F
         .map_err(|e| Failure::new(EXIT_RUNTIME, format!("cannot open array: {e}")))?;
 
     stage(verbose, "formatting output");
-    let display = display_path(&abs);
     let grid_shape = array.grid().grid_shape();
     Ok(match format {
-        OutputFormat::Table => render_table(&display, array.metadata(), &grid_shape),
-        OutputFormat::Json => render_json(&display, array.metadata(), &grid_shape),
+        OutputFormat::Table => render_table(display, array.metadata(), &grid_shape),
+        OutputFormat::Json => render_json(display, array.metadata(), &grid_shape),
     })
 }
 
