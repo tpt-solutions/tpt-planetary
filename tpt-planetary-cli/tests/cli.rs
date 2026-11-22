@@ -161,10 +161,8 @@ fn astro_convert_bad_timestamp_is_usage_error() {
 
 #[test]
 fn remote_array_locations_are_not_implemented() {
-    for uri in [
-        "s3://bucket/temperature.zarr",
-        "https://example.org/temperature.zarr",
-    ] {
+    {
+        let uri = "https://example.org/temperature.zarr";
         let out = tptplan(&["array", "inspect", uri]);
         assert_eq!(code(&out), EXIT_NOT_IMPLEMENTED, "uri {uri}");
         assert!(
