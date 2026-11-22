@@ -205,7 +205,7 @@ def test_wcs_header_errors_are_value_errors():
     with pytest.raises(ValueError):
         tp.Wcs.from_header(no_ctype)
     with pytest.raises(ValueError):
-        tp.Wcs.from_header({**base, "CTYPE1": "RA---ZEA", "CTYPE2": "DEC--ZEA"})
+        tp.Wcs.from_header({**base, "CTYPE1": "RA---XYZ", "CTYPE2": "DEC--XYZ"})
     with pytest.raises(ValueError):
         tp.Wcs.from_header({**base, "CTYPE2": "DEC--SIN"})  # mismatched projections
     with pytest.raises(ValueError):

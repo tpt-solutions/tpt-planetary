@@ -104,12 +104,12 @@ def make_tle(
         f"1 {satnum:05d}U {intl:<8s} 26{epoch_day:012.8f} "
         f"{_signed_fraction(ndot)} {_implied(0.0)} {_implied(bstar)} 0 {elnum:4d}"
     )
+    # Eccentricity has seven digits with the leading "0." dropped.
+    ecc_digits = f"{ecc:.7f}"[2:]
     line2 = (
-        f"2 {satnum:05d} {incl_deg:8.4f} {raan_deg:8.4f} "
-        f"{ecc:.7f}"[2:]
+        f"2 {satnum:05d} {incl_deg:8.4f} {raan_deg:8.4f} {ecc_digits}"
         + f" {argp_deg:8.4f} {mean_anomaly_deg:8.4f} {mean_motion:11.8f}{revnum:5d}"
     )
-    line2 = line2[:2] + line2[2:]
     assert len(line1) == 68, f"line 1 body is {len(line1)} characters"
     assert len(line2) == 68, f"line 2 body is {len(line2)} characters"
     return line1 + str(tle_checksum(line1)), line2 + str(tle_checksum(line2))
@@ -148,7 +148,7 @@ def run_orbit_dump(records: list[tuple[str, str, float]]) -> list[str]:
     Mirrors ``_reference.run_validation_dump``: ``cargo run`` of the example,
     records on stdin, one result line per record on stdout.
     """
-    stdin = "\n".join(f"{l1}|{l2}|{t!r}" for l1, l2, t in records) + "\n"
+    stdin = "\n".join(f"{l1}|{l2}|{float(t)!r}" for l1, l2, t in records) + "\n"
     proc = subprocess.run(
         [
             "cargo",
@@ -214,6 +214,7 @@ def test_random_element_sets_match_sgp4(element_sets):
     """Position and velocity agree with sgp4 at 200 random times and on a time grid."""
     records: list[tuple[str, str, float]] = []
     refs: list[tuple[np.ndarray, np.ndarray]] = []
+    skipped = 0
     rng = np.random.default_rng(SEED + 1)
     for index, (l1, l2) in enumerate(element_sets):
         sat = Satrec.twoline2rv(l1, l2, WGS72)
@@ -222,9 +223,14 @@ def test_random_element_sets_match_sgp4(element_sets):
             times = GRID_MINUTES + times
         for t in times:
             code, r, v = reference_state(sat, t)
-            assert code == 0
+            if code != 0:
+                # The reference reports an error (decay) at this time; the
+                # comparison only covers error-free states.
+                skipped += 1
+                continue
             records.append((l1, l2, t))
             refs.append((r, v))
+    assert skipped <= 0.05 * (len(records) + skipped), f"too many reference errors: {skipped}"
 
     lines = run_orbit_dump(records)
     max_pos_km = 0.0

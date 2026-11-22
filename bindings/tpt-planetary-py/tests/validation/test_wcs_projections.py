@@ -119,7 +119,7 @@ def _write_header(tmp_path, name, h):
 def _run_dump(header_path, mode, rows):
     if not EXE.exists():
         pytest.skip(f"{EXE} not built; run cargo build -p tpt-planetary-astro --examples")
-    text = "\n".join(f"{a!r} {b!r}" for a, b in rows) + "\n"
+    text = "\n".join(f"{float(a)!r} {float(b)!r}" for a, b in rows) + "\n"
     proc = subprocess.run(
         [str(EXE), str(header_path), mode],
         input=text,
@@ -285,16 +285,90 @@ def test_sip_inverse_iterative_matches_wcslib(tmp_path):
     assert dpix < PIX_TOL, f"SIP iterative: max pixel diff {dpix:.3e}"
 
 
+def _eval_poly(terms, u, v):
+    return sum(c * u**p * v**q for (p, q), c in terms)
+
+
 def test_sip_inverse_polynomial_matches_wcslib(tmp_path):
-    # With AP/BP: our world -> pixel applies the AP/BP polynomials to the linear
-    # offsets. Astropy's sip_foc2pix applies the same polynomials.
+    # With AP/BP: world -> pixel is the linear inverse followed by the FITS SIP
+    # inverse polynomials, pixel = crpix + U + AP(U, V) with U, V the linear
+    # offsets from CRPIX. Astropy's sip_foc2pix uses a different convention for
+    # its input, so the reference is the FITS definition evaluated in numpy from
+    # astropy's linear world -> pixel transform.
     h = _sip_header_text({**SIP_FORWARD, **SIP_INVERSE})
     path = _write_header(tmp_path, "sip_ap", h)
     sky = _sip_sky_near_reference(h)
     ours = _run_dump(path, "w2p", sky)
     wcs = _astropy(h)
     foc = wcs.wcs_world2pix(sky, 1)
-    ref = wcs.sip_foc2pix(foc, 1)
+    crpix = np.array([h["CRPIX1"], h["CRPIX2"]])
+    u = foc[:, 0] - crpix[0]
+    v = foc[:, 1] - crpix[1]
+    ap_terms = [((p, q), SIP_INVERSE[f"AP_{p}_{q}"]) for (p, q) in [(2, 0), (1, 1), (0, 2)]]
+    bp_terms = [((p, q), SIP_INVERSE[f"BP_{p}_{q}"]) for (p, q) in [(2, 0), (1, 1), (0, 2)]]
+    ref = np.column_stack(
+        [
+            crpix[0] + u + _eval_poly(ap_terms, u, v),
+            crpix[1] + v + _eval_poly(bp_terms, u, v),
+        ]
+    )
     ok = _assert_nan_pattern(ours, ref, "SIP AP/BP inverse")
     dpix = np.abs(ours[ok] - ref[ok]).max()
     assert dpix < PIX_TOL, f"SIP AP/BP: max pixel diff {dpix:.3e}"
+
+
+# TPV distortion: TAN with the 40-term polynomials PV1_k (xi) and PV2_k (eta).
+# Coefficients span orders 0 to 7 and the radius terms, with the linear identity.
+TPV_HEADER = {
+    "CTYPE1": "RA---TPV",
+    "CTYPE2": "DEC--TPV",
+    "CRVAL1": 150.0,
+    "CRVAL2": 20.0,
+    "CRPIX1": 200.5,
+    "CRPIX2": 200.5,
+    "CDELT1": -2.0e-4,
+    "CDELT2": 2.0e-4,
+    "CUNIT1": "deg",
+    "CUNIT2": "deg",
+    # The polynomial variables are pixel-scale (up to about 230), so the
+    # coefficients are small: each term contributes about 1e-5 degrees.
+    "PV1_1": 1.0,
+    "PV1_3": 1.0e-3,
+    "PV1_4": 1.0e-6,
+    "PV1_5": -5.0e-7,
+    "PV1_6": 2.0e-6,
+    "PV1_7": 1.0e-9,
+    "PV1_12": 1.0e-12,
+    "PV1_24": 1.0e-17,
+    "PV1_39": 1.0e-20,
+    "PV2_1": 1.0,
+    "PV2_3": -2.0e-4,
+    "PV2_4": -1.0e-6,
+    "PV2_9": 1.0e-9,
+    "PV2_17": 1.0e-14,
+    "PV2_31": 1.0e-19,
+}
+
+
+def test_tpv_matches_wcslib(tmp_path):
+    h = TPV_HEADER
+    path = _write_header(tmp_path, "tpv", h)
+    pix = _pixels(h)
+    ours = _run_dump(path, "p2w", pix)
+    wcs = _astropy(h)
+    ref = wcs.wcs_pix2world(pix, 1)
+    ok = _assert_nan_pattern(ours, ref, "TPV pixel to world")
+    sep = _sep_deg(ours[ok, 0], ours[ok, 1], ref[ok, 0], ref[ok, 1])
+    assert sep.max() < DEG_TOL, f"TPV p2w: max sep {sep.max():.3e} deg"
+
+
+def test_tpv_inverse_matches_wcslib(tmp_path):
+    h = TPV_HEADER
+    path = _write_header(tmp_path, "tpv_inv", h)
+    pix = _pixels(h)
+    world = _astropy(h).wcs_pix2world(pix, 1)
+    ours = _run_dump(path, "w2p", world)
+    ref = _astropy(h).wcs_world2pix(world, 1)
+    ok = _assert_nan_pattern(ours, ref, "TPV world to pixel")
+    dpix = np.abs(ours[ok] - ref[ok]).max()
+    assert dpix < PIX_TOL, f"TPV w2p: max pixel diff {dpix:.3e}"
