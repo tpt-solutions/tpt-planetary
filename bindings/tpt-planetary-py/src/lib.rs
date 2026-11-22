@@ -16,6 +16,7 @@ mod core_api;
 mod ephemeris;
 mod errors;
 mod hdf5;
+mod orbit;
 
 use pyo3::prelude::*;
 
@@ -63,5 +64,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(array::open_netcdf3, m)?)?;
     m.add_class::<hdf5::Hdf5Data>()?;
     m.add_function(wrap_pyfunction!(hdf5::open_hdf5, m)?)?;
+
+    // Orbits: SGP4/SDP4 satellites from two-line element sets.
+    m.add_class::<orbit::Satellite>()?;
     Ok(())
 }

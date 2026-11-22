@@ -229,7 +229,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] Confirm `pyo3` / `maturin` license and abi3 policy
 - [x] PyO3 module scaffold, `maturin` build config
 - [x] Bind core: time scales, angles, spherical math
-- [ ] Bind astro: frames, ephemeris, WCS — PARTIAL (scope per ADR-004): ICRS and Galactic frames and WCS are bound and their validation suite runs. The SPK kernel is bound (`open_spk`, `SpkKernel.state`, `astrometric`, `apparent`, `et_from_tdb`), tested against Horizons when a kernel is supplied; the rest of the ephemeris API is not bound.
+- [ ] Bind astro: frames, ephemeris, WCS, SGP4/SDP4 (`Satellite`, checked against the sgp4 reference rows), PCK orientation — PARTIAL (scope per ADR-004): ICRS and Galactic frames and WCS are bound and their validation suite runs. The SPK kernel is bound (`open_spk`, `SpkKernel.state`, `astrometric`, `apparent`, `et_from_tdb`), tested against Horizons when a kernel is supplied; the rest of the ephemeris API is not bound.
 - [ ] Bind array: open Zarr/NetCDF3/HDF5 (HDF5 read-only through `open_hdf5`, tested against the h5py fixtures), slice, lazy ops, compute — PARTIAL: local Zarr with slicing, float64 reads and reductions; NetCDF-3 files can be opened, listed and read whole or by selection (`open_netcdf3`; the whole variable is decoded first, so no partial I/O); no remote stores
 - [ ] NumPy interop (zero-copy where possible) via `numpy` crate — PARTIAL: copies on read, no zero-copy path
 - [ ] xarray / Dask integration (backend entrypoint or adapter) and SunPy/Astropy interop notes

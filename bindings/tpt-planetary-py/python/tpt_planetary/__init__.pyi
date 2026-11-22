@@ -281,3 +281,24 @@ def open_hdf5(path: str | PathLike[str]) -> Hdf5File:
     HDF5 file or uses an unsupported feature.
     """
     ...
+
+
+class Satellite:
+    """An SGP4/SDP4 satellite from a two-line element set (TEME frame, km and km/s).
+
+    Orbits with a period of 225 minutes or more use the SDP4 deep-space terms.
+    """
+
+    @staticmethod
+    def from_tle(line1: str, line2: str) -> Satellite:
+        """Initialise from the two TLE lines (checksums are checked)."""
+        ...
+    @property
+    def epoch(self) -> tuple[float, float]:
+        """Epoch as a two-part Julian date ``(day, fraction)``."""
+        ...
+    def propagate(
+        self, minutes: float
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Position (km) and velocity (km/s) at ``minutes`` after the epoch."""
+        ...
