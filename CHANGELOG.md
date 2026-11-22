@@ -98,6 +98,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `tptplan array index` for the Niño-3.4 indices of a local Zarr field.
 - Apparent directions (`tptplan ephemeris query --apparent`), checked against
   Horizons at five epochs.
+- UT1 in `tptplan astro convert` (`--eop FILE`, an IERS finals2000A file), checked
+  against astropy's IERS-B values; interpolation across a gap of more than a day is
+  an error.
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
   coefficients; matches `erfa.nut00b` to 1e-13 rad.
 - Atmospheric refraction for Alt/Az: the ERFA `refco` constants
