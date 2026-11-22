@@ -182,8 +182,10 @@ class NetCdf3File:
     def shape(self, name: str) -> tuple[int, ...]:
         """Shape of variable ``name``."""
         ...
-    def read(self, name: str) -> NDArray[np.float64] | float:
-        """Read variable ``name`` as a float64 array of its shape (a float if scalar).
+    def read(self, name: str, selection: Selection = None) -> NDArray[np.float64] | float:
+        """Read variable ``name``, or a selection of it, as float64 (a float if no dimension is left).
+
+        ``selection`` follows ``ZarrArray.read``. The whole variable is decoded first.
 
         Raises FileNotFoundError for an unknown name.
         """

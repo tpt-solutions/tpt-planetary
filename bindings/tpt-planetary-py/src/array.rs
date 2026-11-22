@@ -14,7 +14,7 @@ use numpy::{IntoPyArray, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PySlice, PyTuple};
 
-use tpt_planetary_array::selection::{output_shape, resolve_all};
+use tpt_planetary_array::selection::{ResolvedDim, output_shape, resolve_all};
 use tpt_planetary_array::{Array, Expr, FsStore, Selection, Slice, Store};
 
 use crate::errors::{array_error, value_error};
@@ -79,45 +79,50 @@ fn selection_item(item: &Bound<'_, PyAny>) -> PyResult<Selection> {
     }
 }
 
+/// Turns the Python `selection` argument into one `Selection` per dimension,
+/// padding missing trailing dimensions with `:`.
+fn selections_for(shape: &[u64], selection: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<Selection>> {
+    let ndim = shape.len();
+    let items: Vec<Selection> = match selection {
+        None => Vec::new(),
+        Some(obj) if obj.is_none() => Vec::new(),
+        Some(obj) => {
+            if let Ok(tuple) = obj.cast::<PyTuple>() {
+                tuple
+                    .iter()
+                    .map(|it| selection_item(&it))
+                    .collect::<PyResult<_>>()?
+            } else {
+                vec![selection_item(obj)?]
+            }
+        }
+    };
+    if items.len() > ndim {
+        return Err(value_error(format!(
+            "too many indices: array has {ndim} dimensions, got {}",
+            items.len()
+        )));
+    }
+    let mut out = items;
+    out.resize(ndim, Selection::ALL);
+    // A step at least as long as its dimension selects only the start index,
+    // so clamping it is exact. Clamping also keeps the core crate's
+    // `step * stride` arithmetic from overflowing on huge steps.
+    for (sel, &len) in out.iter_mut().zip(shape) {
+        if let Selection::Range(slice) = sel {
+            let max_step = (len as i64).max(1);
+            if slice.step > max_step {
+                slice.step = max_step;
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl ZarrArray {
-    /// Turns the Python `selection` argument into one `Selection` per dimension,
-    /// padding missing trailing dimensions with `:`.
+    /// Selections for this array's shape; see [`selections_for`].
     fn selections(&self, selection: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<Selection>> {
-        let ndim = self.array.shape().len();
-        let items: Vec<Selection> = match selection {
-            None => Vec::new(),
-            Some(obj) if obj.is_none() => Vec::new(),
-            Some(obj) => {
-                if let Ok(tuple) = obj.cast::<PyTuple>() {
-                    tuple
-                        .iter()
-                        .map(|it| selection_item(&it))
-                        .collect::<PyResult<_>>()?
-                } else {
-                    vec![selection_item(obj)?]
-                }
-            }
-        };
-        if items.len() > ndim {
-            return Err(value_error(format!(
-                "too many indices: array has {ndim} dimensions, got {}",
-                items.len()
-            )));
-        }
-        let mut out = items;
-        out.resize(ndim, Selection::ALL);
-        // A step at least as long as its dimension selects only the start index,
-        // so clamping it is exact. Clamping also keeps the core crate's
-        // `step * stride` arithmetic from overflowing on huge steps.
-        for (sel, &len) in out.iter_mut().zip(self.array.shape()) {
-            if let Selection::Range(slice) = sel {
-                let max_step = (len as i64).max(1);
-                if slice.step > max_step {
-                    slice.step = max_step;
-                }
-            }
-        }
-        Ok(out)
+        selections_for(self.array.shape(), selection)
     }
 }
 
@@ -276,16 +281,70 @@ impl NetCdf3File {
         PyTuple::new(py, shape)
     }
 
-    /// Reads variable `name` into a new float64 NumPy array with the variable's
-    /// shape. A scalar variable gives a Python float.
-    fn read<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    /// Reads variable `name`, or a selection of it, into a new float64 NumPy
+    /// array. `selection` follows `ZarrArray.read`: an int, a slice, or a tuple
+    /// of them, one per dimension. A scalar variable gives a Python float.
+    ///
+    /// The whole variable is decoded first; a selection only chooses which
+    /// values are copied out.
+    #[pyo3(signature = (name, selection = None))]
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        selection: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let reader = self.reader()?;
         let shape = reader.shape(name).map_err(array_error)?;
+        let shape64: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
         let data = reader.read_f64(name).map_err(array_error)?;
-        if shape.is_empty() {
-            let value = data.first().copied().unwrap_or(f64::NAN);
+        let sels = selections_for(&shape64, selection.as_ref())?;
+        let resolved = resolve_all(&shape64, &sels).map_err(array_error)?;
+        let out_shape: Vec<usize> = output_shape(&resolved)
+            .iter()
+            .map(|&d| d as usize)
+            .collect();
+        let values = gather(&data, &shape64, &resolved);
+        if out_shape.is_empty() {
+            let value = values.first().copied().unwrap_or(f64::NAN);
             return Ok(value.into_pyobject(py)?.into_any());
         }
-        Ok(data.into_pyarray(py).reshape(shape)?.into_any())
+        Ok(values.into_pyarray(py).reshape(out_shape)?.into_any())
+    }
+}
+
+/// Copies the selected values out of `data`, a row-major array of `shape`, in
+/// the output's row-major order. `resolved` comes from `resolve_all`; dimensions
+/// dropped by integer indices have a count of one.
+fn gather(data: &[f64], shape: &[u64], resolved: &[ResolvedDim]) -> Vec<f64> {
+    let total: u64 = resolved.iter().map(|r| r.count).product();
+    if total == 0 {
+        return Vec::new();
+    }
+    let nd = shape.len();
+    let mut strides = vec![1u64; nd];
+    for d in (0..nd.saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * shape[d + 1];
+    }
+    let mut out = Vec::with_capacity(total as usize);
+    let mut idx = vec![0u64; nd];
+    loop {
+        let offset: u64 = (0..nd)
+            .map(|d| (resolved[d].start + idx[d] * resolved[d].step) * strides[d])
+            .sum();
+        out.push(data[offset as usize]);
+        // Advance the multi-index like an odometer, last dimension fastest.
+        let mut d = nd;
+        loop {
+            if d == 0 {
+                return out;
+            }
+            d -= 1;
+            idx[d] += 1;
+            if idx[d] < resolved[d].count {
+                break;
+            }
+            idx[d] = 0;
+        }
     }
 }
