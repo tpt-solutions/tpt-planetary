@@ -114,3 +114,15 @@ fn codec_zstd_round_trip_1mib(bencher: divan::Bencher) {
         codec.decode(black_box(&enc)).expect("decode")
     });
 }
+
+/// Blosc (lz4, clevel 5, byte shuffle, 8-byte elements) encode and decode of 1 MiB.
+#[divan::bench]
+fn codec_blosc_lz4_round_trip_1mib(bencher: divan::Bencher) {
+    use tpt_planetary_array::codec::blosc::{BloscCodec, BloscShuffle};
+    let data = payload_1mib();
+    let codec = BloscCodec::new("lz4", 5, BloscShuffle::Byte, 8).expect("codec");
+    bencher.bench_local(|| {
+        let enc = codec.encode(black_box(&data)).expect("encode");
+        codec.decode(black_box(&enc)).expect("decode")
+    });
+}
