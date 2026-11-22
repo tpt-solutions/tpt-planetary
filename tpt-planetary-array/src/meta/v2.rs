@@ -120,15 +120,17 @@ pub fn array_json(meta: &ArrayMetadata) -> Result<String> {
     if meta.format != ZarrFormat::V2 {
         return Err(Error::InvalidMetadata("array is not in v2 format".into()));
     }
+    // A v2 codec object is its configuration with the codec name under uid=197609(Phillip) gid=197121 groups=197121.
+    let with_id = |spec: &CodecSpec| -> Value {
+        let mut obj = spec.config.as_object().cloned().unwrap_or_default();
+        obj.insert("id".to_string(), Value::String(spec.name.clone()));
+        Value::Object(obj)
+    };
     let (compressor, filters): (Value, Vec<Value>) = match meta.codecs.split_last() {
-        Some((last, rest)) if COMPRESSOR_IDS.contains(&last.name.as_str()) => (
-            last.config.clone(),
-            rest.iter().map(|c| c.config.clone()).collect(),
-        ),
-        _ => (
-            Value::Null,
-            meta.codecs.iter().map(|c| c.config.clone()).collect(),
-        ),
+        Some((last, rest)) if COMPRESSOR_IDS.contains(&last.name.as_str()) => {
+            (with_id(last), rest.iter().map(with_id).collect())
+        }
+        _ => (Value::Null, meta.codecs.iter().map(with_id).collect()),
     };
     let filters = if filters.is_empty() {
         Value::Null
@@ -287,5 +289,41 @@ mod tests {
         let c = consolidated_json(vec![(".zgroup".into(), json!({"zarr_format": 2}))]).unwrap();
         let entries = parse_consolidated(c.as_bytes()).unwrap();
         assert_eq!(entries[0].0, ".zgroup");
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod writer_id_tests {
+    use super::*;
+    use crate::dtype::DType;
+    use crate::fill::FillValue;
+
+    /// The compressor and filter objects carry their codec name under `id`,
+    /// which zarr-python needs to select the codec.
+    #[test]
+    fn compressor_and_filters_carry_their_id() {
+        let meta = ArrayMetadata::new(ZarrFormat::V2, vec![4], vec![4], DType::FLOAT64)
+            .unwrap()
+            .with_fill_value(FillValue::Float(0.0))
+            .with_codecs(vec![
+                CodecSpec {
+                    name: "delta".into(),
+                    config: json!({"dtype": "<f8"}),
+                },
+                CodecSpec {
+                    name: "blosc".into(),
+                    config: json!({"cname": "lz4", "clevel": 5, "shuffle": 1}),
+                },
+            ]);
+        let text = array_json(&meta).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["compressor"]["id"], "blosc");
+        assert_eq!(doc["compressor"]["cname"], "lz4");
+        assert_eq!(doc["filters"][0]["id"], "delta");
+        // The metadata reads back to the same codecs.
+        let again = parse_array(text.as_bytes(), None).unwrap();
+        let names: Vec<&str> = again.codecs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["delta", "blosc"]);
+        assert_eq!(again.codecs[1].config["cname"], "lz4");
     }
 }
