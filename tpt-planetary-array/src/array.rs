@@ -296,17 +296,35 @@ impl Array {
         }
         let index = shard.parse_index_section(&index_bytes, size as usize)?;
         let wanted = shard.inner_indices_touched(selections)?;
-        let store = &self.store;
+        // Fetch the stored inner chunks with as few requests as possible:
+        // nearby ranges are merged, and each read is then sliced from a fetched
+        // range.
+        let ranges: Vec<(u64, u64)> = wanted
+            .iter()
+            .filter_map(|&n| index.entries().get(n).copied().flatten())
+            .collect();
+        let fetched: Vec<(u64, Vec<u8>)> = coalesce_ranges(&ranges, COALESCE_GAP)
+            .into_iter()
+            .map(|(start, len)| {
+                let v = self
+                    .store
+                    .get_range(&key, start, len)?
+                    .ok_or_else(|| Error::NotFound(format!("shard '{key}'")))?;
+                if v.len() as u64 != len {
+                    return Err(Error::Codec(
+                        "sharding: short read of an inner chunk".into(),
+                    ));
+                }
+                Ok((start, v))
+            })
+            .collect::<Result<_>>()?;
         let bytes = shard.decode_selected(&index, &wanted, |off, len| {
-            let v = store
-                .get_range(&key, off, len)?
-                .ok_or_else(|| Error::NotFound(format!("shard '{key}'")))?;
-            if v.len() as u64 != len {
-                return Err(Error::Codec(
-                    "sharding: short read of an inner chunk".into(),
-                ));
-            }
-            Ok(v)
+            let (start, buf) = fetched
+                .iter()
+                .find(|(s, b)| *s <= off && off + len <= *s + b.len() as u64)
+                .ok_or_else(|| Error::Codec("sharding: inner chunk was not fetched".into()))?;
+            let from = (off - start) as usize;
+            Ok(buf[from..from + len as usize].to_vec())
         })?;
         Ok(Some(bytes))
     }
@@ -428,6 +446,31 @@ fn lock_cache(
     cache
         .lock()
         .map_err(|_| Error::Io("chunk cache lock poisoned".to_string()))
+}
+
+/// Largest gap, in bytes, that partial shard reads bridge when merging the
+/// ranges of inner chunks into one request. Bridging a gap reads wasted bytes,
+/// so the gap is kept small.
+const COALESCE_GAP: u64 = 4096;
+
+/// Merges byte ranges `(offset, len)` that overlap or lie within `max_gap`
+/// bytes of each other. Returns the merged ranges sorted by offset. Every input
+/// range is contained in one output range.
+pub(crate) fn coalesce_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u64)> {
+    let mut sorted: Vec<(u64, u64)> = ranges.iter().copied().filter(|r| r.1 > 0).collect();
+    sorted.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+    for (off, len) in sorted {
+        let end = off.saturating_add(len);
+        match out.last_mut() {
+            Some((s, l)) if off <= s.saturating_add(*l).saturating_add(max_gap) => {
+                let new_end = end.max(s.saturating_add(*l));
+                *l = new_end - *s;
+            }
+            _ => out.push((off, len)),
+        }
+    }
+    out
 }
 
 /// The sharding codec of `meta`, when its only codec is `sharding_indexed`.
@@ -894,6 +937,7 @@ mod shard_read_tests {
     struct Counting {
         inner: MemoryStore,
         bytes_read: AtomicU64,
+        requests: AtomicU64,
     }
 
     impl Store for Counting {
@@ -905,6 +949,7 @@ mod shard_read_tests {
             Ok(v)
         }
         fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Option<Vec<u8>>> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
             let v = self.inner.get_range(key, start, len)?;
             if let Some(b) = &v {
                 self.bytes_read.fetch_add(b.len() as u64, Ordering::SeqCst);
@@ -949,6 +994,7 @@ mod shard_read_tests {
         let store = Arc::new(Counting {
             inner: MemoryStore::new(),
             bytes_read: AtomicU64::new(0),
+            requests: AtomicU64::new(0),
         });
         let NodeMetadata::Array(meta) = parse_node(SHARD_FIXTURE.as_bytes()).unwrap() else {
             panic!("expected an array");
@@ -980,6 +1026,41 @@ mod shard_read_tests {
         assert_eq!(fetched, 16 * 16 + 4 * 8);
         // The whole shard is 64 * 8 bytes of data plus the index.
         assert!(fetched < 64 * 8 + 16 * 16);
+    }
+
+    #[test]
+    fn coalescing_merges_nearby_ranges_only() {
+        assert_eq!(coalesce_ranges(&[], 10), vec![]);
+        // Adjacent and overlapping ranges merge; a far range stays separate.
+        assert_eq!(
+            coalesce_ranges(&[(20, 5), (0, 10), (10, 5), (100, 4)], 0),
+            vec![(0, 15), (20, 5), (100, 4)]
+        );
+        // A gap of up to max_gap is bridged.
+        assert_eq!(coalesce_ranges(&[(0, 10), (15, 5)], 5), vec![(0, 20)]);
+        assert_eq!(
+            coalesce_ranges(&[(0, 10), (16, 5)], 5),
+            vec![(0, 10), (16, 5)]
+        );
+        // Containment and zero-length ranges.
+        assert_eq!(
+            coalesce_ranges(&[(0, 100), (10, 5), (50, 0)], 0),
+            vec![(0, 100)]
+        );
+    }
+
+    #[test]
+    fn partial_read_coalesces_adjacent_inner_chunks() {
+        let (store, array) = make();
+        let data: Vec<f64> = (0..64).map(|i| i as f64 + 1.0).collect();
+        array.write_f64(&[], &data).unwrap();
+        // Rows 0..2 of the 4x4 inner grid: inner chunks 0..4 are contiguous in
+        // the shard, so the data needs one request, plus the index.
+        store.requests.store(0, Ordering::SeqCst);
+        let sel = [Selection::Range(Slice::range(0, 2)), Selection::ALL];
+        let got = array.read_f64(&sel).unwrap();
+        assert_eq!(got, data[..16].to_vec());
+        assert_eq!(store.requests.load(Ordering::SeqCst), 2);
     }
 
     #[test]
