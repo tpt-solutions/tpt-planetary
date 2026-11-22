@@ -47,6 +47,8 @@ pub mod cio;
 mod cio_data;
 
 #[cfg(feature = "std")]
+pub mod astrometry;
+#[cfg(feature = "std")]
 pub mod frames;
 #[cfg(feature = "std")]
 pub mod orbit;
