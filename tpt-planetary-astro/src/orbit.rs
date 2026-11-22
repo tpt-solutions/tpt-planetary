@@ -15,9 +15,10 @@
 //!   WGS-72 constants. Output is in the TEME frame, in km and km/s.
 //!
 //! Limits:
-//! - Deep-space orbits (period of 225 minutes or more) are rejected with
-//!   [`OrbitError::DeepSpace`]. The SDP4 lunar-solar and resonance terms are
-//!   not implemented.
+//! - Deep-space orbits (period of 225 minutes or more) use the SDP4 lunar-solar
+//!   and resonance terms (see `sdp4`), as in the reference `sgp4` package. The
+//!   resonance integrator starts from the epoch state at each propagation, so
+//!   results do not depend on the order of calls.
 //! - Orbit determination (fitting elements to observations) is not
 //!   implemented.
 //! - The SGP4 `ndot` and `nddot` fields of a TLE are parsed but not used, as in
@@ -120,9 +121,6 @@ pub enum OrbitError {
     TleSatelliteMismatch,
     /// The mean motion is zero or negative.
     MeanMotionNonPositive,
-    /// The orbital period is 225 minutes or more. Deep-space (SDP4) orbits are
-    /// not implemented.
-    DeepSpace,
     /// The eccentricity at the requested time is outside `[0, 1)` (SGP4 error 1
     /// or 3).
     EccentricityOutOfRange,
@@ -147,9 +145,6 @@ impl fmt::Display for OrbitError {
                 f.write_str("TLE lines 1 and 2 have different satellite numbers")
             }
             OrbitError::MeanMotionNonPositive => f.write_str("mean motion is not positive"),
-            OrbitError::DeepSpace => f.write_str(
-                "orbital period is 225 minutes or more; deep-space SGP4 is not implemented",
-            ),
             OrbitError::EccentricityOutOfRange => {
                 f.write_str("SGP4 eccentricity is outside the range 0 to 1")
             }
@@ -767,16 +762,18 @@ fn check_checksum(line: &str, line_number: u8) -> Result<(), OrbitError> {
     Ok(())
 }
 
-/// Smallest period that SGP4 treats as near-Earth, in minutes.
+/// Period at or above which SGP4 uses the deep-space (SDP4) terms, in minutes.
 const DEEP_SPACE_PERIOD_MIN: f64 = 225.0;
+
+mod sdp4;
 
 /// The SGP4 near-Earth propagator, initialised from a TLE.
 ///
 /// Built with [`Sgp4::from_tle`] or [`Sgp4::from_tle_lines`]. Propagation is
 /// with [`Sgp4::propagate`], which returns the TEME state at a time in minutes
 /// from the TLE epoch. Initialisation follows `sgp4init` in the 2006 code, with
-/// the improved ("i") operation mode; the sidereal-time term is not needed for
-/// near-Earth orbits.
+/// the improved ("i") operation mode. Orbits with a period of 225 minutes or
+/// more also get the SDP4 deep-space terms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sgp4 {
     epoch: JulianDate,
@@ -815,6 +812,8 @@ pub struct Sgp4 {
     x1mth2: f64,
     x7thm1: f64,
     isimp: bool,
+    /// SDP4 state for deep-space orbits; `None` for near-Earth orbits.
+    deep: Option<sdp4::DeepState>,
 }
 
 impl Sgp4 {
@@ -860,9 +859,7 @@ impl Sgp4 {
         del = d1 / (adel * adel);
         let no_unkozai = no_kozai / (1.0 + del);
 
-        if TAU / no_unkozai >= DEEP_SPACE_PERIOD_MIN {
-            return Err(OrbitError::DeepSpace);
-        }
+        let deep_space = TAU / no_unkozai >= DEEP_SPACE_PERIOD_MIN;
 
         let ao = (xke / no_unkozai).powf(x2o3);
         let sinio = inclo.sin();
@@ -878,7 +875,7 @@ impl Sgp4 {
         let qzms2t = qzms2ttemp * qzms2ttemp * qzms2ttemp * qzms2ttemp;
         let temp4 = 1.5e-12;
 
-        let isimp = rp < 220.0 / radius + 1.0;
+        let isimp = rp < 220.0 / radius + 1.0 || deep_space;
         let mut sfour = ss;
         let mut qzms24 = qzms2t;
         let perige = (rp - 1.0) * radius;
@@ -968,8 +965,22 @@ impl Sgp4 {
                 * (3.0 * d4 + 12.0 * cc1 * d3 + 6.0 * d2 * d2 + 15.0 * cc1sq * (2.0 * d2 + cc1sq));
         }
 
+        // Deep-space state (sgp4init): epoch in days since 1949 December 31 0h,
+        // and sidereal time at epoch from SGP4's gstime.
+        let jd = tle.epoch_jd();
+        let deep = if deep_space {
+            let epoch_days = (jd.day() - 2_433_281.5) + jd.fraction();
+            let gsto = sdp4::gstime(jd.day() + jd.fraction());
+            Some(sdp4::initialise(
+                xke, epoch_days, ecco, eccsq, argpo, inclo, mo, mdot, no_unkozai, nodeo, nodedot,
+                argpdot, gsto,
+            ))
+        } else {
+            None
+        };
+
         Ok(Sgp4 {
-            epoch: tle.epoch_jd(),
+            epoch: jd,
             xke,
             j2,
             radius_km: radius,
@@ -1005,6 +1016,7 @@ impl Sgp4 {
             x1mth2,
             x7thm1,
             isimp,
+            deep,
         })
     }
 
@@ -1057,9 +1069,36 @@ impl Sgp4 {
         }
         let nm0 = self.no_unkozai;
         let mut em = self.ecco;
-        let inclm = self.inclo;
+        let mut inclm = self.inclo;
+        let mut nm = nm0;
 
-        let am = (self.xke / nm0).powf(x2o3) * tempa * tempa;
+        // Deep-space secular and resonance terms (SDP4 `dspace`).
+        if let Some(ds) = &self.deep {
+            let d = sdp4::dspace(
+                ds,
+                self.argpo,
+                self.argpdot,
+                t,
+                self.no_unkozai,
+                em,
+                argpm,
+                inclm,
+                mm,
+                nodem,
+                nm,
+            );
+            em = d.em;
+            inclm = d.inclm;
+            argpm = d.argpm;
+            mm = d.mm;
+            nodem = d.nodem;
+            nm = d.nm;
+            if nm <= 0.0 {
+                return Err(OrbitError::MeanMotionNonPositive);
+            }
+        }
+
+        let am = (self.xke / nm).powf(x2o3) * tempa * tempa;
         let nm = self.xke / am.powf(1.5);
         em -= tempe;
         if !(-0.001..1.0).contains(&em) {
@@ -1070,27 +1109,65 @@ impl Sgp4 {
         }
         mm += self.no_unkozai * templ;
         let xlm = mm + argpm + nodem;
-        nodem = nodem.rem_euclid(TAU);
+        // The node keeps its sign (as in the reference code); the other angles
+        // are reduced to [0, 2 pi).
+        nodem = if nodem >= 0.0 {
+            nodem % TAU
+        } else {
+            -((-nodem) % TAU)
+        };
         argpm = argpm.rem_euclid(TAU);
         let xlm = xlm.rem_euclid(TAU);
         let mm = (xlm - argpm - nodem).rem_euclid(TAU);
 
-        // Lunar-solar periodics are not used (near-Earth model).
         let sinim = inclm.sin();
         let cosim = inclm.cos();
-        let ep = em;
-        let xincp = inclm;
-        let argpp = argpm;
-        let nodep = nodem;
-        let mp = mm;
-        let sinip = sinim;
-        let cosip = cosim;
+        let mut ep = em;
+        let mut xincp = inclm;
+        let mut argpp = argpm;
+        let mut nodep = nodem;
+        let mut mp = mm;
+        let (sinip, cosip, aycof, xlcof, con41, x1mth2, x7thm1);
+        if let Some(ds) = &self.deep {
+            // Lunar-solar periodics (SDP4 `dpper`), then the deep-space
+            // orientation terms, which use the perturbed inclination.
+            (ep, xincp, nodep, argpp, mp) = sdp4::dpper(ds, t, false, ep, xincp, nodep, argpp, mp);
+            if xincp < 0.0 {
+                xincp = -xincp;
+                nodep += PI;
+                argpp -= PI;
+            }
+            if !(0.0..=1.0).contains(&ep) {
+                return Err(OrbitError::EccentricityOutOfRange);
+            }
+            let j3oj2 = WGS72_J3 / WGS72_J2;
+            sinip = xincp.sin();
+            cosip = xincp.cos();
+            aycof = -0.5 * j3oj2 * sinip;
+            xlcof = if (cosip + 1.0).abs() > 1.5e-12 {
+                -0.25 * j3oj2 * sinip * (3.0 + 5.0 * cosip) / (1.0 + cosip)
+            } else {
+                -0.25 * j3oj2 * sinip * (3.0 + 5.0 * cosip) / 1.5e-12
+            };
+            let cosisq = cosip * cosip;
+            con41 = 3.0 * cosisq - 1.0;
+            x1mth2 = 1.0 - cosisq;
+            x7thm1 = 7.0 * cosisq - 1.0;
+        } else {
+            sinip = sinim;
+            cosip = cosim;
+            aycof = self.aycof;
+            xlcof = self.xlcof;
+            con41 = self.con41;
+            x1mth2 = self.x1mth2;
+            x7thm1 = self.x7thm1;
+        }
 
         // Long-period periodics.
         let axnl = ep * argpp.cos();
         let temp = 1.0 / (am * (1.0 - ep * ep));
-        let aynl = ep * argpp.sin() + temp * self.aycof;
-        let xl = mp + argpp + nodep + temp * self.xlcof * axnl;
+        let aynl = ep * argpp.sin() + temp * aycof;
+        let xl = mp + argpp + nodep + temp * xlcof * axnl;
 
         // Kepler's equation, Vallado's fixed-count Newton iteration. The sines
         // and cosines of the last evaluation are kept for the short-period
@@ -1136,13 +1213,12 @@ impl Sgp4 {
         let temp2 = temp1 * temp;
 
         // Short-period periodics.
-        let con41 = self.con41;
-        let mrt = rl * (1.0 - 1.5 * temp2 * betal * con41) + 0.5 * temp1 * self.x1mth2 * cos2u;
-        su -= 0.25 * temp2 * self.x7thm1 * sin2u;
+        let mrt = rl * (1.0 - 1.5 * temp2 * betal * con41) + 0.5 * temp1 * x1mth2 * cos2u;
+        su -= 0.25 * temp2 * x7thm1 * sin2u;
         let xnode = nodep + 1.5 * temp2 * cosip * sin2u;
         let xinc = xincp + 1.5 * temp2 * cosip * sinip * cos2u;
-        let mvt = rdotl - nm * temp1 * self.x1mth2 * sin2u / self.xke;
-        let rvdot = rvdotl + nm * temp1 * (self.x1mth2 * cos2u + 1.5 * con41) / self.xke;
+        let mvt = rdotl - nm * temp1 * x1mth2 * sin2u / self.xke;
+        let rvdot = rvdotl + nm * temp1 * (x1mth2 * cos2u + 1.5 * con41) / self.xke;
 
         // Orientation vectors.
         let sinsu = su.sin();
@@ -1561,16 +1637,27 @@ mod tests {
     }
 
     #[test]
-    fn deep_space_is_rejected() {
-        // Two revolutions per day: period 720 minutes.
+    fn deep_space_orbit_initialises_and_propagates() {
+        // Two revolutions per day: period 720 minutes, so the SDP4 terms apply.
         let l1 = "1 00900U 64063A   21001.00000000  .00000000  00000-0  00000-0 0  9995";
         let l2 = "2 00900  50.0000 100.0000 0010000 100.0000 260.0000  2.00000000    00";
         let l1 = with_checksum(l1);
         let l2 = with_checksum(l2);
-        assert_eq!(
-            Sgp4::from_tle_lines(&l1, &l2).unwrap_err(),
-            OrbitError::DeepSpace
-        );
+        let sat = Sgp4::from_tle_lines(&l1, &l2).expect("deep-space orbit initialises");
+        let state = sat.propagate(0.0).expect("propagates at epoch");
+        let r = (state.position_km[0].powi(2)
+            + state.position_km[1].powi(2)
+            + state.position_km[2].powi(2))
+        .sqrt();
+        // A 720-minute, low-eccentricity orbit has a radius of about 26,500 km.
+        assert!(r > 20_000.0 && r < 35_000.0, "radius {r} km");
+    }
+
+    #[test]
+    fn gstime_at_j2000_is_the_sgp4_sidereal_time() {
+        // SGP4's gstime at 2000-01-01 12h TT: about 280.46 degrees.
+        let g = super::sdp4::gstime(2_451_545.0).to_degrees();
+        assert!((g - 280.460_618).abs() < 1e-3, "gstime {g} deg");
     }
 
     /// Replaces column 69 with the computed checksum (for synthetic lines).
