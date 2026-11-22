@@ -526,6 +526,27 @@ fn compress_stream(compressor: u8, clevel: u8, data: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl BloscCodec {
+    /// Creates a Blosc codec that encodes with back end `cname` (`lz4`, `zlib`
+    /// or `zstd`; `blosclz` and `snappy` are decode-only), compression level
+    /// `clevel` (0 to 9), the given shuffle, and element size `typesize` in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown `cname` or a `clevel` above 9.
+    pub fn new(cname: &str, clevel: u8, shuffle: BloscShuffle, typesize: usize) -> Result<Self> {
+        if clevel > 9 {
+            return Err(Error::InvalidMetadata(format!(
+                "blosc clevel {clevel} exceeds 9"
+            )));
+        }
+        Ok(Self {
+            compressor: compressor_code(cname)?,
+            clevel,
+            shuffle,
+            typesize,
+        })
+    }
+
     /// Encodes `input` as one Blosc frame (a single block, so `blocksize` is the
     /// input length). Falls back to a memcpy frame when compression does not
     /// make the data smaller.
@@ -868,6 +889,16 @@ mod tests {
             shuffle,
             typesize,
         }
+    }
+
+    #[test]
+    fn constructor_rejects_bad_names_and_levels() {
+        assert!(BloscCodec::new("lz4", 9, BloscShuffle::Byte, 8).is_ok());
+        assert!(BloscCodec::new("nope", 5, BloscShuffle::None, 1).is_err());
+        assert!(BloscCodec::new("lz4", 10, BloscShuffle::None, 1).is_err());
+        // Decode-only back ends are accepted as names but cannot encode.
+        let snappy = BloscCodec::new("snappy", 5, BloscShuffle::None, 1).unwrap();
+        assert!(snappy.encode(&[0u8; 64]).is_err());
     }
 
     #[test]
