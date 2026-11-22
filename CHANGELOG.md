@@ -139,7 +139,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - WCS projections ARC, ZEA, STG, CAR, MOL and HPX, SIP distortion with the
   inverse, and FITS image reading and writing for primary and IMAGE HDUs.
 - Orbits: Keplerian elements, Kepler's equation, TLE parsing and the near-Earth
-  SGP4 model (WGS-72).
+  SGP4 model (WGS-72), with the SDP4 deep-space terms for orbits of 225 minutes
+  or more (checked against the sgp4 package: 1.2e-9 km over 226 states).
 - Frames: the mean ecliptic of date (IAU 2006 precession), the true ecliptic of
   date (with nutation), and the nutation chain with the frame bias.
 - Astrometry: annual aberration (checked against ERFA), proper motion along the
