@@ -23,7 +23,7 @@ pub trait Store: Send + Sync {
     /// of the value is clipped.
     ///
     /// The default reads the whole value and slices it. Stores that can read
-    /// part of an object (such as [`HttpStore`](crate::store::HttpStore)) override it.
+    /// part of an object (such as [`HttpStore`]) override it.
     fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Option<Vec<u8>>> {
         Ok(self.get(key)?.map(|value| {
             let s = usize::try_from(start)
@@ -88,6 +88,8 @@ pub fn join(path: &str, child: &str) -> String {
     }
 }
 
+pub mod async_store;
+
 #[cfg(feature = "std")]
 pub use http::HttpStore;
 
@@ -99,6 +101,21 @@ pub use fs::FsStore;
 
 #[cfg(feature = "std")]
 mod http;
+
+#[cfg(feature = "std")]
+pub(crate) mod transport;
+
+#[cfg(feature = "std")]
+pub(crate) mod sigv4;
+
+#[cfg(feature = "std")]
+pub use sigv4::Credentials;
+
+#[cfg(feature = "std")]
+pub mod s3;
+
+#[cfg(feature = "std")]
+pub use s3::S3Store;
 
 #[cfg(feature = "std")]
 pub mod limit;
