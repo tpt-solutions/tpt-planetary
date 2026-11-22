@@ -31,7 +31,7 @@ passing, so the status cannot drift silently.
 | Quantity | Reference function and version | Epochs or points | Max difference | Tolerance | Status |
 | --- | --- | --- | --- | --- | --- |
 | Leap-second table (28 steps, last value 37 s) | `erfa.dat` (pyerfa 2.0.1.5); `LeapSeconds` (astropy 8.0.2) | 119 dates: 1 Jan and 1 Jul 1972-2017, plus the day before each step | Integer steps identical. Max residual 4.7e-12 s (two-part JD rounding) | Exact integer; residual below 1 ns | pass |
-| TT -> TDB (three leading terms) | `erfa.dtdb` (pyerfa 2.0.1.5) | 404 TT epochs, 2000-2026 | 14.89 us (mean 1.28 us, std 5.0 us) | 1 us for validation; 20 us regression guard | xfail (validation); pass (guard) |
+| TT -> TDB (full 787-term series, geocentre) | `erfa.dtdb` (pyerfa 2.0.1.5) | 400 random TT epochs, 2000-2026, plus 4 fixed epochs | below 0.0005 us (printed as 0.000 us) | 1 us | pass |
 | Earth rotation angle | `erfa.era00` (pyerfa 2.0.1.5) | 200 UT1 = UTC epochs, 2000-2026, UT1-UTC = 0 | 1.1e-6 arcsec (was 4.0e-6 before the rounding fix, see findings) | 1 mas | pass |
 | GMST (IAU 2006) | `erfa.gmst06` (pyerfa 2.0.1.5) | same 200 epochs, TT = UT1 + 69.184 s | 1.2e-6 arcsec (7.7e-5 ms of time; was 3.6e-6 arcsec) | 1 mas | pass |
 | Mean obliquity, IAU 2006 | `erfa.obl06` (pyerfa 2.0.1.5) | J2000.0, +1 and +10 Julian centuries | 0 (identical at the printed precision) | 1 mas | pass |
@@ -228,9 +228,9 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   applies the observer's velocity aberration, which is up to about 20 arcsec.
   The observed latitude offset of 20.7 arcsec is consistent with that. Our
   frame is barycentric, so the frames differ.
-- **TDB (xfail, not changed).** The three leading terms leave residuals up to
-  14.9 us. The crate documents this as an approximation. The regression guard
-  keeps it from growing past 20 us.
+- **TDB (now passes).** The crate evaluates the full series, so the residual
+  against `erfa.dtdb` is below 0.0005 us. This replaces the three-term result
+  of 14.9 us that was recorded before.
 - **Polar motion sign convention (confirmed, not changed).** The crate's W
   (`polar_motion_matrix`, `W = R2(xp) R1(yp)`) equals the transpose of
   `erfa.pom00(xp, yp, 0)` to double precision. ERFA's note says its matrix
@@ -290,12 +290,13 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
 
 ## Not validated
 
-- **Full TDB series.** Only the three leading terms are implemented, and only
-  the geocentric term is checked. Topocentric terms and dates outside
-  2000-2026 are untested.
-- **Nutation beyond IAU 2000A_R06.** IAU 2000B is not implemented. 
+- **TDB topocentric terms.** The full geocentric series is implemented and
+  checked for 2000-2026 and four fixed epochs. The observer-dependent terms
+  are not implemented, and dates outside 2000-2026 are only checked at the
+  fixed points.
+- **Nutation beyond IAU 2000A_R06.** IAU 2000B is implemented (`nutation_angles_2000b`) and checked against `erfa.nut00b`; it differs from 2000A by up to 2.3 mas over 1900-2100.
 - **CIP and CIO beyond IAU 2006/2000A.** The X, Y and s series are the IAU
-  2006/2000A tables only. IAU 2000B is not implemented. The TIO locator is the
+  2006/2000A tables only. The TIO locator is the
   secular value (Eq. 5.13). The polar-motion dependent part (Eqs. 5.4 and 5.12)
   is not computed. Polar motion and UT1 are inputs, and no IERS data is bundled.
   The chain is checked against ERFA with polar motion of 0.1 and 0.2 arcsec only.

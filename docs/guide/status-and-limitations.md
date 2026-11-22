@@ -38,8 +38,8 @@ None of the four milestones in `todo.md` is met yet.
   datasets, or netCDF4 and xarray files. Several items below are open in
   `todo.md` for this reason.
 - **Constants and coefficients written from memory.** The Galactic pole
-  constants, the three TDB terms, the IAU 2006 obliquity coefficients, and the
-  Earth-Sun series are unvalidated. The Earth-Sun series is accurate to about
+  constants, the IAU 2006 obliquity coefficients, and the Earth-Sun series are
+  unvalidated. (The TDB series is now the full ERFA table; see below.) The Earth-Sun series is accurate to about
   1e-4 AU by its own documentation. The Galactic values agree with published
   M31 coordinates to the digits shown in [Time and frames](time-and-frames.md),
   which is a sanity check only.
@@ -48,12 +48,13 @@ None of the four milestones in `todo.md` is met yet.
   checked against the IERS readme.
 - **Polar-motion sign.** The `W = R2(xp) R1(yp)` convention is checked against
   `erfa.pom00` and `erfa.c2t06a` (see `docs/validation.md`).
-- **TDB.** Only three terms of the series are used, so the result is an
-  approximation with a truncation bound of about 1.7 ms.
+- **TDB.** The geocentre value uses the full 787-term series and matches
+  `erfa.dtdb` to below 0.0005 us. The topocentric terms are not implemented.
 - **Alt/Az.** `icrs_to_altaz_at` applies no atmospheric refraction, no annual or
   diurnal aberration, no light deflection and no parallax. Its validation
   against Astropy therefore includes the annual aberration (about 20 arcsec)
-  as a known difference. The observed (refracted) place is not implemented.
+  as a known difference. Refraction is available in Rust as
+  `icrs_to_altaz_refracted_at`; the CLI and Python bindings do not expose it.
 - **Polar motion history.** No EOP series is bundled. `xp` and `yp` are inputs,
   and the TIO locator is the secular value `-47 uas t`. The polar-motion term
   of Eq. 5.4, which needs a polar-motion time series, is not computed.
@@ -70,7 +71,7 @@ None of the four milestones in `todo.md` is met yet.
   and matrix, no frame bias). IAU 2000A_R06 nutation is available as
   `tpt_planetary_astro::nutation`: the full luni-solar and planetary series in
   longitude and obliquity, the nutation matrix, and the classical equation of the
-  equinoxes `dpsi cos(eps0)` plus those complementary terms. Limits: no IAU 2000B. the complementary terms of the equation of the
+  equinoxes `dpsi cos(eps0)` plus those complementary terms. Limits: the complementary terms of the equation of the
   origins are included (`astro::cio`). No frame bias in the nutation matrix.
 - The CIP X and Y, the CIO and TIO locators, and the ICRS to ITRS matrix are in
   `tpt_planetary_astro::cio` (IAU 2006/2000A, validated against pyerfa). There is

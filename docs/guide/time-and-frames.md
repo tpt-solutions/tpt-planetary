@@ -79,14 +79,14 @@ valid_until = CivilDate { year: 2027, month: 6, day: 28 } version=1
 
 ## TDB and TT (astro)
 
-`tpt_planetary_astro::time` converts between TT and TDB with the leading
-three terms of the Fairhead and Bretagnon series. The bound on the
-truncation is about 1.7 ms: the amplitudes of the three terms sum to
-1.6929 ms.
+`tpt_planetary_astro::time` converts between TT and TDB with the full
+787-term Fairhead and Bretagnon series, with the JPL-mass terms that ERFA adds.
+The result is the geocentre value; it matches `erfa.dtdb` to below 0.0005 us.
 
-- The three terms were transcribed from memory of the ERFA `dtdb` leading
-  terms. They have **not** been checked against the source tables.
-- The full series is not implemented, so the result is an approximation.
+- The coefficients are the ones in ERFA's `dtdb.c` (derived from SOFA), copied
+  by `tools/gen_tdb_table.py`. They were not checked against the 1990 paper.
+- The topocentric terms, which depend on the observer's position, are not
+  included.
 - Date pairs are passed as `(hi, lo)` with `hi + lo` the Julian date.
 
 The example below continues from the TT epoch above, using the same run. The
@@ -208,7 +208,7 @@ Accuracy against pyerfa over 1900-2100 (see [Validation](validation.md)):
   the difference between ERFA's `xys06a` and `xy06` routes to X and Y. The
   series used here matches `xy06`.
 
-Not included: IAU 2000B; the polar-motion history term of s' (Eqs. 5.4 and
+Not included: the polar-motion history term of s' (Eqs. 5.4 and
 5.12, bounded by the chapter at 0.4 mas per century); UT1 and polar motion,
 which are inputs (no IERS data is bundled); The module needs `std`.
 

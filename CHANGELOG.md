@@ -76,8 +76,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 #### tpt-planetary-astro
 
-- TT to TDB and back, using the three leading terms of the Fairhead and
-  Bretagnon series (the full series is not implemented).
+- TT to TDB and back, using the full 787-term Fairhead and Bretagnon series
+  with the JPL-mass terms (geocentre; matches `erfa.dtdb`).
+- Herrick-Gibbs velocity from three closely spaced positions
+  (`orbit::herrick_gibbs_velocity`).
+- IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
+  coefficients; matches `erfa.nut00b` to 1e-13 rad.
+- Atmospheric refraction for Alt/Az: the ERFA `refco` constants
+  (`frames::refraction_coefficients`) and `frames::icrs_to_altaz_refracted_at`.
 - Earth rotation angle, GMST (IAU 2006) and GAST.
 - Mean obliquity of the ecliptic (IAU 2006).
 - `finals2000A` EOP parser and `EopTable` with UT1-UTC and polar-motion
@@ -149,7 +155,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Gibbs velocity from three positions on one orbit (`orbit::gibbs_velocity`).
 - Scope decisions for 0.1 (`docs/adr/ADR-004-scope-decisions-for-0.1.md`):
   reference data is user-supplied, FK4 and FK5 are out of scope, no async
-  runtime is added, Vincenty only, and three-term TDB.
+  runtime is added and Vincenty only. (The three-term TDB decision in that
+  record was later replaced by the full series.)
 - The Python validation suite runs (321 passed, 3 expected failures) with
   astropy, sgp4 and numpy.
 
