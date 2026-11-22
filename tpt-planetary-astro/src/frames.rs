@@ -687,6 +687,140 @@ pub fn icrs_to_altaz_at(
     SkyCoord::from_radians(az, alt)
 }
 
+/// Ambient conditions at the observer, used for atmospheric refraction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Atmosphere {
+    /// Pressure at the observer in hPa (millibar). Zero switches refraction off.
+    pub pressure_hpa: f64,
+    /// Ambient temperature in degrees Celsius.
+    pub temperature_c: f64,
+    /// Relative humidity, from 0 (dry) to 1 (saturated).
+    pub relative_humidity: f64,
+    /// Observing wavelength in micrometres. Values up to 100 select the
+    /// optical/IR refractivity; larger values select the radio case.
+    pub wavelength_um: f64,
+}
+
+impl Atmosphere {
+    /// The constants `(A, B)` in radians of the refraction model
+    /// `dZ = A tan Z + B tan^3 Z`; see [`refraction_coefficients`].
+    #[must_use]
+    pub fn refraction_coefficients(&self) -> (f64, f64) {
+        refraction_coefficients(
+            self.pressure_hpa,
+            self.temperature_c,
+            self.relative_humidity,
+            self.wavelength_um,
+        )
+    }
+}
+
+/// Constants `(A, B)` of the atmospheric refraction model `dZ = A tan Z +
+/// B tan^3 Z`, in radians, where `Z` is the observed zenith distance and `dZ`
+/// is the amount to add to it to get the true (in vacuo) zenith distance.
+///
+/// This is the ERFA `eraRefco` model (Stone 1996 with the Hohenkerk and
+/// Sinclair refractivity; the same constants as SOFA). Inputs are clamped to
+/// the ranges that model accepts (temperature -150 to 100 C, pressure 0 to
+/// 10000 hPa, humidity 0 to 1, wavelength 0.1 um to 1e6 um). Zero pressure
+/// gives `(0, 0)`.
+///
+/// Against `erfa.refco` (pyerfa 2.0.1.5) the optical/IR constants agree to
+/// about 2e-16 relative and the radio constants to about 4e-15 over a grid of
+/// pressures, temperatures, humidities and wavelengths.
+#[must_use]
+pub fn refraction_coefficients(
+    pressure_hpa: f64,
+    temperature_c: f64,
+    relative_humidity: f64,
+    wavelength_um: f64,
+) -> (f64, f64) {
+    let optic = wavelength_um <= 100.0;
+    let t = temperature_c.clamp(-150.0, 100.0);
+    let p = pressure_hpa.clamp(0.0, 10_000.0);
+    let r = relative_humidity.clamp(0.0, 1.0);
+    let w = wavelength_um.clamp(0.1, 1.0e6);
+    // Partial pressure of water vapour, hPa.
+    let pw = if p > 0.0 {
+        let ps = 10f64.powf((0.7859 + 0.03477 * t) / (1.0 + 0.00412 * t))
+            * (1.0 + p * (4.5e-6 + 6e-10 * t * t));
+        r * ps / (1.0 - (1.0 - r) * ps / p)
+    } else {
+        0.0
+    };
+    let tk = t + 273.15;
+    let gamma = if optic {
+        let w2 = w * w;
+        (77.534_84e-6 + (4.391_08e-7 + 3.666e-9 / w2) / w2) * p / tk - 11.2684e-6 * pw / tk
+    } else {
+        77.6890e-6 * p / tk - (6.3938e-6 - 0.375_463 / tk) * pw / tk
+    };
+    let mut beta = 4.4474e-6 * tk;
+    if !optic {
+        beta -= 0.0074 * pw * beta;
+    }
+    let a = gamma * (1.0 - beta);
+    let b = -gamma * (beta - gamma / 2.0);
+    (a, b)
+}
+
+/// Observed zenith distance for a true zenith distance `z_true`, given the
+/// refraction constants `(a, b)`: solves `Z = z_true - (a tan Z + b tan^3 Z)`
+/// by fixed-point iteration. The iteration contracts by about `a / cos^2 Z`
+/// per step, so it converges for the zenith distances in use here.
+fn refract_zenith(z_true: f64, a: f64, b: f64) -> f64 {
+    let mut z = z_true;
+    for _ in 0..50 {
+        let t = z.tan();
+        let next = z_true - (a * t + b * t * t * t);
+        let done = (next - z).abs() < 1e-15;
+        z = next;
+        if done {
+            break;
+        }
+    }
+    z
+}
+
+/// Altitude and azimuth of an ICRS direction for a geodetic observer, with
+/// atmospheric refraction applied to the geometric altitude.
+///
+/// The geometric result is [`icrs_to_altaz_at`]; the refraction model is
+/// [`refraction_coefficients`]. The observed zenith distance is found from the
+/// true one by fixed-point iteration, and the azimuth is unchanged.
+///
+/// Accuracy: the constants match ERFA, and against ERFA's own refraction
+/// inside `erfa.atco13` (same geometric zenith distance, pressure 1013.25 hPa,
+/// 15 C, 50 % humidity, 0.55 um) the refracted zenith distance agrees to
+/// 0.003 arcsec for true zenith distances up to 75 degrees. At 82 degrees the
+/// two differ by 0.04 arcsec, because ERFA inverts the same model by a
+/// different expansion. The model itself is an approximation of a
+/// ray-traced atmosphere, with errors of tens of milliarcseconds at 80
+/// degrees.
+///
+/// The refraction is applied for true zenith distances below 85 degrees.
+/// Above that, and below the horizon, the geometric position is returned,
+/// because the model diverges there.
+#[must_use]
+pub fn icrs_to_altaz_refracted_at(
+    coord: SkyCoord<Icrs>,
+    observer: GeodeticObserver,
+    ctx: &TransformContext,
+    atmosphere: Atmosphere,
+) -> SkyCoord<AltAz> {
+    let geometric = icrs_to_altaz_at(coord, observer, ctx);
+    if atmosphere.pressure_hpa.is_nan() || atmosphere.pressure_hpa <= 0.0 {
+        return geometric;
+    }
+    let z_true = PI / 2.0 - geometric.lat();
+    if z_true.is_nan() || z_true >= 85.0 * DEG {
+        return geometric;
+    }
+    let (a, b) = atmosphere.refraction_coefficients();
+    let z_obs = refract_zenith(z_true, a, b);
+    SkyCoord::from_radians(geometric.lon(), PI / 2.0 - z_obs)
+}
+
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -1031,5 +1165,76 @@ mod tests {
         let obs = GeodeticObserver::from_degrees(0.0, 0.0, 0.0);
         let p = obs.itrs_position();
         assert!((p[0] - WGS84.semi_major_axis()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn refraction_constants_match_erfa_refco() {
+        // Reference values from erfa.refco (pyerfa 2.0.1.5).
+        let (a, b) = refraction_coefficients(1013.25, 15.0, 0.5, 0.55);
+        assert!((a - 0.000_277_195_406_842_925_06).abs() < 1e-16);
+        assert!((b + 3.171_695_036_812_495_7e-7).abs() < 1e-19);
+        let (a, b) = refraction_coefficients(800.0, -5.0, 1.0, 0.7);
+        assert!((a - 0.000_233_580_201_323_805_69).abs() < 1e-16);
+        assert!((b + 2.515_483_750_111_349e-7).abs() < 1e-19);
+        // Radio case (wavelength above 100 um) and zero pressure.
+        let (a, b) = refraction_coefficients(1013.25, 15.0, 1.0, 500.0);
+        assert!((a - 0.000_349_809_457_216_720_8).abs() < 1e-16);
+        assert!((b + 3.306_280_035_631_262e-7).abs() < 1e-19);
+        assert_eq!(refraction_coefficients(0.0, 15.0, 0.5, 0.55), (0.0, 0.0));
+    }
+
+    #[test]
+    fn refracted_zenith_distance_matches_erfa_atco13() {
+        // Pairs of (true, observed) zenith distance from erfa.atco13 with
+        // pressure 1013.25 hPa, 15 C, humidity 0.5, wavelength 0.55 um.
+        let (a, b) = refraction_coefficients(1013.25, 15.0, 0.5, 0.55);
+        let cases = [
+            (1.429_280_087_844_303_f64, 1.427_465_121_309_391_6_f64), // 81.9 deg
+            (1.313_388_954_891_147_5, 1.312_357_549_068_745_4),       // 75.3 deg
+            (1.142_944_881_793_565_7, 1.142_341_328_163_741_1),       // 65.5 deg
+            (0.979_870_208_247_958_6, 0.979_458_452_618_181_1),       // 56.1 deg
+        ];
+        let arcsec = PI / 180.0 / 3600.0;
+        for (z_true, z_erfa) in cases {
+            let z_obs = refract_zenith(z_true, a, b);
+            let diff = (z_obs - z_erfa).abs() / arcsec;
+            // Tight at moderate zenith distances; ERFA inverts the model with a
+            // different expansion, so the largest case allows 0.05 arcsec.
+            let tol = if z_true > 1.4 { 0.05 } else { 0.005 };
+            assert!(diff < tol, "z_true {z_true}: {diff} arcsec from ERFA");
+        }
+    }
+
+    #[test]
+    fn refraction_lifts_objects_and_leaves_zenith_and_azimuth_alone() {
+        let ctx = TransformContext::new((2_451_545.0, 0.0), (2_451_545.0, 0.0), 0.0, 0.0);
+        let obs = GeodeticObserver::from_degrees(0.0, 45.0, 0.0);
+        let star = SkyCoord::<Icrs>::from_degrees(30.0, 60.0);
+        let dry = Atmosphere {
+            pressure_hpa: 0.0,
+            temperature_c: 15.0,
+            relative_humidity: 0.5,
+            wavelength_um: 0.55,
+        };
+        let air = Atmosphere {
+            pressure_hpa: 1013.25,
+            ..dry
+        };
+        let geometric = icrs_to_altaz_at(star, obs, &ctx);
+        assert_eq!(icrs_to_altaz_refracted_at(star, obs, &ctx, dry), geometric);
+        let refracted = icrs_to_altaz_refracted_at(star, obs, &ctx, air);
+        // Refraction raises the altitude by about A tan Z (about a minute of arc here).
+        let lift = refracted.lat() - geometric.lat();
+        let z = PI / 2.0 - geometric.lat();
+        let (a, _) = air.refraction_coefficients();
+        assert!(lift > 0.0 && (lift - a * z.tan()).abs() < 0.02 * lift);
+        assert!(angle_gap(refracted.lon(), geometric.lon()) < 1e-15);
+
+        // Below the horizon the geometric position is returned unchanged.
+        let low = SkyCoord::<Icrs>::from_degrees(0.0, -60.0);
+        assert_eq!(
+            icrs_to_altaz_refracted_at(low, obs, &ctx, air),
+            icrs_to_altaz_at(low, obs, &ctx)
+        );
     }
 }

@@ -235,8 +235,8 @@ fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
 /// times `t1 < t2 < t3`, and `mu` is the gravitational parameter in km^3/s^2
 /// (for example [`WGS72_MU_KM3_S2`]). The result is the velocity at `r2` in
 /// km/s, and is exact for an unperturbed two-body orbit. The method needs the
-/// three positions to be well separated in angle: for nearly collinear
-/// directions use Herrick-Gibbs instead (not implemented here).
+/// three positions to be well separated in angle: for closely spaced
+/// observations use [`herrick_gibbs_velocity`] instead.
 ///
 /// Returns [`OrbitError::DegenerateState`] if the positions are coplanar with
 /// the origin in a degenerate way (zero cross products) and
@@ -273,6 +273,49 @@ pub fn gibbs_velocity(
     let k = (mu / (nm * dm)).sqrt();
     let v2 = add3(scale3(cross(d, r2), 1.0 / n2), svec);
     Ok(scale3(v2, k))
+}
+
+/// Velocity at the middle of three position vectors that are close in time,
+/// by the Herrick-Gibbs approximation (Vallado, *Fundamentals of
+/// Astrodynamics*, algorithm 54).
+///
+/// `r1`, `r2`, `r3` are positions in km at times `t1 < t2 < t3` in seconds
+/// (any common origin), and `mu` is the gravitational parameter in km^3/s^2.
+/// The result is the velocity at `r2` in km/s. Unlike [`gibbs_velocity`] this
+/// needs no angular separation between the positions, so it suits closely
+/// spaced observations. It is an expansion in the time spacing: the error
+/// shrinks rapidly as the spacing decreases, and it is not exact for a
+/// two-body orbit.
+///
+/// Returns [`OrbitError::InvalidElements`] for a non-positive `mu` or times
+/// that are not strictly increasing, and [`OrbitError::DegenerateState`] for a
+/// zero position vector.
+pub fn herrick_gibbs_velocity(
+    r1: [f64; 3],
+    r2: [f64; 3],
+    r3: [f64; 3],
+    t1: f64,
+    t2: f64,
+    t3: f64,
+    mu: f64,
+) -> Result<[f64; 3], OrbitError> {
+    if mu.is_nan() || mu <= 0.0 || !mu.is_finite() {
+        return Err(OrbitError::InvalidElements);
+    }
+    if !(t1 < t2 && t2 < t3 && t3.is_finite()) {
+        return Err(OrbitError::InvalidElements);
+    }
+    let (n1, n2, n3) = (norm3(r1), norm3(r2), norm3(r3));
+    if n1 == 0.0 || n2 == 0.0 || n3 == 0.0 {
+        return Err(OrbitError::DegenerateState);
+    }
+    let dt21 = t2 - t1;
+    let dt31 = t3 - t1;
+    let dt32 = t3 - t2;
+    let c1 = -dt32 * (1.0 / (dt21 * dt31) + mu / (12.0 * n1 * n1 * n1));
+    let c2 = (dt32 - dt21) * (1.0 / (dt21 * dt32) + mu / (12.0 * n2 * n2 * n2));
+    let c3 = dt21 * (1.0 / (dt32 * dt31) + mu / (12.0 * n3 * n3 * n3));
+    Ok(add3(add3(scale3(r1, c1), scale3(r2, c2)), scale3(r3, c3)))
 }
 
 /// Solves Kepler's equation `M = E - e sin E` for the eccentric anomaly `E`
@@ -1613,6 +1656,62 @@ mod tests {
         assert_eq!(
             gibbs_velocity(s1.position_km, s2.position_km, s3.position_km, 0.0),
             Err(OrbitError::InvalidElements)
+        );
+    }
+
+    #[test]
+    fn herrick_gibbs_error_falls_with_spacing() {
+        // LEO-like orbit; three states centred on mean anomaly 0.5 rad, spaced
+        // by `h` seconds. The velocity error must shrink quickly with `h`.
+        let elements = Keplerian {
+            semi_major_axis_km: 7_000.0,
+            eccentricity: 0.01,
+            inclination_rad: 0.9,
+            raan_rad: 0.4,
+            arg_perigee_rad: 1.1,
+            anomaly: Anomaly::Mean(0.5),
+            epoch: JulianDate::new(2_451_545.0, 0.0),
+        };
+        let n = elements.mean_motion_rad_s();
+        let mut errors = Vec::new();
+        for h in [60.0_f64, 30.0, 15.0] {
+            let at = |dt: f64| {
+                let mut e = elements;
+                e.anomaly = Anomaly::Mean(0.5 + n * dt);
+                e.to_state().unwrap()
+            };
+            let (s1, s2, s3) = (at(-h), at(0.0), at(h));
+            let v = herrick_gibbs_velocity(
+                s1.position_km,
+                s2.position_km,
+                s3.position_km,
+                -h,
+                0.0,
+                h,
+                WGS72_MU_KM3_S2,
+            )
+            .unwrap();
+            let err = norm3(add3(v, scale3(s2.velocity_km_s, -1.0)));
+            errors.push(err);
+        }
+        // Halving the spacing cuts the error by about 2^4 = 16 (measured: 2.9e-6,
+        // 1.8e-7, 1.2e-8 km/s). Accept a factor of at least 10 per halving.
+        for pair in errors.windows(2) {
+            assert!(
+                pair[1] * 10.0 < pair[0],
+                "errors {errors:?} do not fall fast enough"
+            );
+        }
+        assert!(errors[2] < 1e-7, "15 s spacing error {}", errors[2]);
+
+        let r = [7_000.0, 0.0, 0.0];
+        assert_eq!(
+            herrick_gibbs_velocity(r, r, r, 0.0, 0.0, 1.0, WGS72_MU_KM3_S2),
+            Err(OrbitError::InvalidElements)
+        );
+        assert_eq!(
+            herrick_gibbs_velocity([0.0; 3], r, r, 0.0, 1.0, 2.0, WGS72_MU_KM3_S2),
+            Err(OrbitError::DegenerateState)
         );
     }
 }
