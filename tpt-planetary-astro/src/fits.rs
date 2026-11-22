@@ -1605,6 +1605,343 @@ fn decode_element(col: &Column, raw: &[u8]) -> f64 {
     }
 }
 
+/// Values of one column of a binary table, as stored (big-endian on disk).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColumnData<'a> {
+    /// `L`: logical values, stored as `T` or `F`.
+    Logical(&'a [bool]),
+    /// `B`: unsigned bytes.
+    Byte(&'a [u8]),
+    /// `I`: 16-bit signed integers.
+    Short(&'a [i16]),
+    /// `J`: 32-bit signed integers.
+    Int(&'a [i32]),
+    /// `K`: 64-bit signed integers.
+    Long(&'a [i64]),
+    /// `E`: 32-bit floats.
+    Float(&'a [f32]),
+    /// `D`: 64-bit floats.
+    Double(&'a [f64]),
+    /// `A`: one string per row, each padded with spaces to the width (bytes).
+    Text(&'a [&'a str], usize),
+}
+
+/// One column of a binary table to write.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TableColumn<'a> {
+    /// Column name (`TTYPEn`).
+    pub name: &'a str,
+    /// Values, row by row: `repeat` values per row for numeric and logical columns.
+    pub data: ColumnData<'a>,
+    /// Elements per row (1 for a scalar column). Not used by `Text`, whose width
+    /// is part of the data.
+    pub repeat: usize,
+    /// `TSCALn`: physical = `tzero + tscal * stored`. Use 1.0 for none.
+    pub tscal: f64,
+    /// `TZEROn`. Use 0.0 for none.
+    pub tzero: f64,
+    /// `TNULLn`: the stored integer that means undefined (integer columns only).
+    pub tnull: Option<i64>,
+}
+
+impl ColumnData<'_> {
+    /// The `TFORM` type letter and bytes per element.
+    fn code_and_size(&self) -> (char, usize) {
+        match self {
+            ColumnData::Logical(_) => ('L', 1),
+            ColumnData::Byte(_) => ('B', 1),
+            ColumnData::Short(_) => ('I', 2),
+            ColumnData::Int(_) => ('J', 4),
+            ColumnData::Long(_) => ('K', 8),
+            ColumnData::Float(_) => ('E', 4),
+            ColumnData::Double(_) => ('D', 8),
+            ColumnData::Text(_, _) => ('A', 1),
+        }
+    }
+
+    /// Number of stored values (not rows).
+    fn value_count(&self) -> usize {
+        match self {
+            ColumnData::Logical(v) => v.len(),
+            ColumnData::Byte(v) => v.len(),
+            ColumnData::Short(v) => v.len(),
+            ColumnData::Int(v) => v.len(),
+            ColumnData::Long(v) => v.len(),
+            ColumnData::Float(v) => v.len(),
+            ColumnData::Double(v) => v.len(),
+            ColumnData::Text(v, _) => v.len(),
+        }
+    }
+}
+
+/// Appends the big-endian bytes of the `repeat` values of one row of a column.
+fn push_row_values(data: &mut Vec<u8>, col: &TableColumn<'_>, row: usize) {
+    let r = col.repeat;
+    match col.data {
+        ColumnData::Logical(v) => {
+            for k in 0..r {
+                data.push(if v[row * r + k] { b'T' } else { b'F' });
+            }
+        }
+        ColumnData::Byte(v) => data.extend_from_slice(&v[row * r..row * r + r]),
+        ColumnData::Short(v) => {
+            for x in &v[row * r..row * r + r] {
+                data.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        ColumnData::Int(v) => {
+            for x in &v[row * r..row * r + r] {
+                data.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        ColumnData::Long(v) => {
+            for x in &v[row * r..row * r + r] {
+                data.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        ColumnData::Float(v) => {
+            for x in &v[row * r..row * r + r] {
+                data.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        ColumnData::Double(v) => {
+            for x in &v[row * r..row * r + r] {
+                data.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        ColumnData::Text(v, width) => {
+            let s = v[row].as_bytes();
+            let take = s.len().min(width);
+            data.extend_from_slice(&s[..take]);
+            data.extend(core::iter::repeat_n(b' ', width - take));
+        }
+    }
+}
+
+/// Writes a binary table: an empty primary HDU followed by a `BINTABLE` extension
+/// holding `columns`. `header` adds cards to the extension header (for example
+/// `EXTNAME`).
+///
+/// # Errors
+///
+/// [`FitsError::ShapeMismatch`] if the columns disagree on the row count, a
+/// value count is not a whole number of rows, or a string is wider than its column; [`FitsError::Unsupported`] for a
+/// non-finite `tscal` or `tzero`; [`FitsError::InvalidKeyword`] for a reserved
+/// keyword in `header`.
+pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> Result<Vec<u8>> {
+    let mut rows: Option<usize> = None;
+    let mut width = 0usize;
+    for c in columns {
+        if !c.tscal.is_finite() || !c.tzero.is_finite() {
+            return Err(FitsError::Unsupported("TSCAL and TZERO must be finite"));
+        }
+        let (_, size) = c.data.code_and_size();
+        let (per_row, n_rows) = match c.data {
+            ColumnData::Text(values, w) => {
+                // A string longer than its column would be truncated: refuse.
+                if values.iter().any(|v| v.len() > w) {
+                    return Err(FitsError::ShapeMismatch);
+                }
+                (w, values.len())
+            }
+            _ => {
+                if c.repeat == 0 || c.data.value_count() % c.repeat != 0 {
+                    return Err(FitsError::ShapeMismatch);
+                }
+                (c.repeat * size, c.data.value_count() / c.repeat)
+            }
+        };
+        match rows {
+            None => rows = Some(n_rows),
+            Some(r) if r != n_rows => return Err(FitsError::ShapeMismatch),
+            Some(_) => {}
+        }
+        width += per_row;
+    }
+    let rows = rows.unwrap_or(0);
+
+    let mut data = Vec::with_capacity(width * rows);
+    for row in 0..rows {
+        for c in columns {
+            push_row_values(&mut data, c, row);
+        }
+    }
+
+    // Primary HDU: no data.
+    let mut primary = Vec::new();
+    push_card(
+        &mut primary,
+        &logical("SIMPLE", true, "conforms to FITS standard"),
+    )?;
+    push_card(
+        &mut primary,
+        &WriteCard {
+            keyword: "BITPIX",
+            value: Some(Value::Integer(8)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut primary,
+        &WriteCard {
+            keyword: "NAXIS",
+            value: Some(Value::Integer(0)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut primary,
+        &logical("EXTEND", true, "file has extensions"),
+    )?;
+    let mut end = [b' '; CARD];
+    end[..3].copy_from_slice(b"END");
+    primary.extend_from_slice(&end);
+    primary.resize(primary.len().div_ceil(BLOCK) * BLOCK, b' ');
+    let primary_bytes = primary;
+
+    // Extension header.
+    let mut ext = Vec::new();
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "XTENSION",
+            value: Some(Value::Text("BINTABLE")),
+            comment: "binary table extension",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "BITPIX",
+            value: Some(Value::Integer(8)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "NAXIS",
+            value: Some(Value::Integer(2)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "NAXIS1",
+            value: Some(Value::Integer(width as i64)),
+            comment: "bytes per row",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "NAXIS2",
+            value: Some(Value::Integer(rows as i64)),
+            comment: "number of rows",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "PCOUNT",
+            value: Some(Value::Integer(0)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "GCOUNT",
+            value: Some(Value::Integer(1)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "TFIELDS",
+            value: Some(Value::Integer(columns.len() as i64)),
+            comment: "",
+        },
+    )?;
+    for (i, c) in columns.iter().enumerate() {
+        let n = i + 1;
+        let (code, _) = c.data.code_and_size();
+        let form = match c.data {
+            ColumnData::Text(_, w) => format!("{w}A"),
+            _ => format!("{}{code}", c.repeat),
+        };
+        let ttype = format!("TTYPE{n}");
+        let tform = format!("TFORM{n}");
+        push_card(
+            &mut ext,
+            &WriteCard {
+                keyword: &ttype,
+                value: Some(Value::Text(c.name)),
+                comment: "",
+            },
+        )?;
+        push_card(
+            &mut ext,
+            &WriteCard {
+                keyword: &tform,
+                value: Some(Value::Text(&form)),
+                comment: "",
+            },
+        )?;
+        let numeric = !matches!(c.data, ColumnData::Text(..) | ColumnData::Logical(_));
+        if numeric && c.tscal != 1.0 {
+            let k = format!("TSCAL{n}");
+            push_card(
+                &mut ext,
+                &WriteCard {
+                    keyword: &k,
+                    value: Some(Value::Float(c.tscal)),
+                    comment: "",
+                },
+            )?;
+        }
+        if numeric && c.tzero != 0.0 {
+            let k = format!("TZERO{n}");
+            push_card(
+                &mut ext,
+                &WriteCard {
+                    keyword: &k,
+                    value: Some(Value::Float(c.tzero)),
+                    comment: "",
+                },
+            )?;
+        }
+        if let (true, Some(null)) = (numeric, c.tnull) {
+            let k = format!("TNULL{n}");
+            push_card(
+                &mut ext,
+                &WriteCard {
+                    keyword: &k,
+                    value: Some(Value::Integer(null)),
+                    comment: "",
+                },
+            )?;
+        }
+    }
+    for card in header {
+        if is_reserved(card.keyword) {
+            return Err(FitsError::InvalidKeyword);
+        }
+        push_card(&mut ext, card)?;
+    }
+    ext.extend_from_slice(&end);
+    ext.resize(ext.len().div_ceil(BLOCK) * BLOCK, b' ');
+
+    let padded = data.len().div_ceil(BLOCK) * BLOCK;
+    let mut out = primary_bytes;
+    out.extend_from_slice(&ext);
+    out.extend_from_slice(&data);
+    out.resize(out.len() + (padded - data.len()), 0);
+    Ok(out)
+}
+
 #[cfg(test)]
 #[cfg(feature = "std")]
 mod tests {
