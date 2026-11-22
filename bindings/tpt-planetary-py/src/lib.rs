@@ -15,6 +15,7 @@ mod astro;
 mod core_api;
 mod ephemeris;
 mod errors;
+mod hdf5;
 
 use pyo3::prelude::*;
 
@@ -60,5 +61,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(array::open_zarr, m)?)?;
     m.add_class::<array::NetCdf3File>()?;
     m.add_function(wrap_pyfunction!(array::open_netcdf3, m)?)?;
+    m.add_class::<hdf5::Hdf5Data>()?;
+    m.add_function(wrap_pyfunction!(hdf5::open_hdf5, m)?)?;
     Ok(())
 }

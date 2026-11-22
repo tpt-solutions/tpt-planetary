@@ -6,6 +6,7 @@ re-exported here. See ``__init__.pyi`` for signatures.
 
 from tpt_planetary._core import (
     CORE_VERSION,
+    Hdf5File,
     JulianDate,
     NetCdf3File,
     TptPlanetaryError,
@@ -21,6 +22,7 @@ from tpt_planetary._core import (
     icrs_to_galactic,
     leap_second_table_expired,
     leap_second_table_info,
+    open_hdf5,
     open_netcdf3,
     open_spk,
     open_zarr,
@@ -46,7 +48,9 @@ __all__ = [
     "icrs_to_galactic",
     "leap_second_table_expired",
     "leap_second_table_info",
+    "Hdf5File",
     "NetCdf3File",
+    "open_hdf5",
     "open_netcdf3",
     "SpkKernel",
     "et_from_tdb",

@@ -242,3 +242,36 @@ def open_spk(path: str | PathLike[str]) -> SpkKernel:
 def et_from_tdb(jd_hi: float, jd_lo: float) -> float:
     """Seconds past J2000 TDB for a TDB Julian date given in two parts."""
     ...
+
+
+class Hdf5File:
+    """A read-only HDF5 file (default format, as h5py and netCDF-4 write it), held in memory.
+
+    Groups, datasets and attributes are addressed by slash-separated paths such as ``/a/b``.
+    Unsupported features (dense groups, version 4 layouts, variable-length strings) raise
+    TptPlanetaryError.
+    """
+
+    def kind(self, path: str) -> Literal["group", "dataset", "other"]:
+        """Kind of the object at ``path``."""
+        ...
+    def list(self, path: str) -> list[str]:
+        """Names of the children of the group at ``path``, in file order."""
+        ...
+    def shape(self, path: str) -> tuple[int, ...]:
+        """Shape of the dataset at ``path``."""
+        ...
+    def read(self, path: str) -> NDArray[np.float64] | float:
+        """Read the dataset at ``path`` as float64 (a float if it is scalar)."""
+        ...
+    def attributes(self, path: str) -> dict[str, object]:
+        """Attributes of the group or dataset at ``path``: numbers as float64, text as str."""
+        ...
+
+def open_hdf5(path: str | PathLike[str]) -> Hdf5File:
+    """Open and read the HDF5 file at ``path``.
+
+    Raises OSError if the file cannot be read and TptPlanetaryError if it is not an
+    HDF5 file or uses an unsupported feature.
+    """
+    ...
