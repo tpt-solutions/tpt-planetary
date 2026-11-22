@@ -92,7 +92,7 @@ pub mod naif {
 pub enum EphemerisError {
     /// The byte slice is shorter than a DAF file record or a referenced range.
     TooShort,
-    /// The file does not start with the `DAF/SPK` identifier.
+    /// The file does not start with the `DAF/SPK` or `DAF/PCK` identifier.
     NotSpk,
     /// The binary format string is not `LTL-IEEE` or `BIG-IEEE`.
     UnsupportedFormat,
@@ -100,6 +100,9 @@ pub enum EphemerisError {
     Malformed(&'static str),
     /// The SPK data type is not implemented (only 2 and 3 are).
     UnsupportedDataType(i32),
+    /// A binary PCK segment is relative to a reference frame this crate does not
+    /// convert (only J2000 and ECLIPJ2000 are handled). The payload is the code.
+    UnsupportedReference(i32),
     /// The requested epoch is outside the segment's coverage.
     OutOfRange {
         /// Requested epoch in seconds past J2000 TDB.
@@ -125,10 +128,16 @@ impl fmt::Display for EphemerisError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooShort => write!(f, "ephemeris data is too short"),
-            Self::NotSpk => write!(f, "not a DAF/SPK file"),
+            Self::NotSpk => write!(f, "not a DAF/SPK or DAF/PCK file"),
             Self::UnsupportedFormat => write!(f, "unsupported DAF binary format string"),
             Self::Malformed(what) => write!(f, "malformed SPK file: {what}"),
             Self::UnsupportedDataType(t) => write!(f, "unsupported SPK data type {t}"),
+            Self::UnsupportedReference(r) => {
+                write!(
+                    f,
+                    "unsupported PCK reference frame {r} (J2000 and ECLIPJ2000 are handled)"
+                )
+            }
             Self::OutOfRange { et, start, end } => {
                 write!(f, "epoch {et} s outside segment coverage [{start}, {end}]")
             }
@@ -293,6 +302,9 @@ pub struct SpkFile<'a> {
     bytes: &'a [u8],
     endian: Endian,
     first_summary_record: u32,
+    /// Integers per summary: 6 for SPK (target, centre, frame, type, start, end),
+    /// 5 for a binary PCK (body, frame, type, start, end).
+    ni: u32,
 }
 
 impl<'a> SpkFile<'a> {
@@ -309,7 +321,8 @@ impl<'a> SpkFile<'a> {
         if bytes.len() < RECORD_BYTES {
             return Err(EphemerisError::TooShort);
         }
-        if !bytes.starts_with(b"DAF/SPK") {
+        // Binary PCK files share the DAF layout and carry the identifier DAF/PCK.
+        if !(bytes.starts_with(b"DAF/SPK") || bytes.starts_with(b"DAF/PCK")) {
             return Err(EphemerisError::NotSpk);
         }
         let endian = match bytes.get(88..96) {
@@ -319,8 +332,11 @@ impl<'a> SpkFile<'a> {
         };
         let nd = read_u32(bytes, 8, endian).ok_or(EphemerisError::TooShort)?;
         let ni = read_u32(bytes, 12, endian).ok_or(EphemerisError::TooShort)?;
-        if nd != 2 || ni != 6 {
-            return Err(EphemerisError::Malformed("SPK requires ND=2 and NI=6"));
+        let is_pck = bytes.starts_with(b"DAF/PCK");
+        if nd != 2 || (ni != 6 && !(is_pck && ni == 5)) {
+            return Err(EphemerisError::Malformed(
+                "SPK requires ND=2 and NI=6 (PCK: NI=5)",
+            ));
         }
         let first_summary_record = read_u32(bytes, 76, endian).ok_or(EphemerisError::TooShort)?;
         if first_summary_record == 0 {
@@ -330,6 +346,7 @@ impl<'a> SpkFile<'a> {
             bytes,
             endian,
             first_summary_record,
+            ni,
         })
     }
 
@@ -379,6 +396,42 @@ impl<'a> SpkFile<'a> {
             Err(EphemerisError::OutOfRange { et, start, end })
         } else {
             Err(EphemerisError::NotFound { target })
+        }
+    }
+
+    /// Orientation angles `(a1, a2, a3)` in radians of the body-fixed frame
+    /// `body_frame` (for example 3000, ITRF93) at epoch `et`, and the reference frame
+    /// code of the segment, from a binary PCK (type 2) segment. The rotation from the
+    /// reference frame to the body frame is `R3(a3) R1(a2) R3(a1)` (see [`crate::pck`]).
+    ///
+    /// Binary PCK segments are labelled by the body-fixed frame, which the summary
+    /// stores in its first integer; the body itself is implied by the frame
+    /// definition, which is not in the file.
+    ///
+    /// # Errors
+    ///
+    /// [`EphemerisError::NotFound`] if no type-2 segment has this frame,
+    /// [`EphemerisError::OutOfRange`] if none covers `et`, and evaluation errors.
+    #[cfg(feature = "std")]
+    pub fn orientation_angles(&self, body_frame: i32, et: f64) -> Result<([f64; 3], i32)> {
+        let mut coverage: Option<(f64, f64)> = None;
+        for seg in self.segments() {
+            let seg = seg?;
+            if seg.target != body_frame || seg.data_type != 2 {
+                continue;
+            }
+            coverage = Some(match coverage {
+                None => (seg.start_et, seg.end_et),
+                Some((s, e)) => (s.min(seg.start_et), e.max(seg.end_et)),
+            });
+            if et >= seg.start_et && et <= seg.end_et {
+                let v = self.evaluate(&seg, et)?;
+                return Ok((v.position, seg.frame));
+            }
+        }
+        match coverage {
+            Some((start, end)) => Err(EphemerisError::OutOfRange { et, start, end }),
+            None => Err(EphemerisError::NotFound { target: body_frame }),
         }
     }
 
@@ -521,7 +574,7 @@ impl Iterator for Segments<'_> {
             if self.index < self.count {
                 let offset = self.base + SUMMARY_RECORD_HEADER + self.index * SPK_SUMMARY_BYTES;
                 self.index += 1;
-                let result = read_summary(self.file.bytes, offset, self.file.endian);
+                let result = read_summary(self.file.bytes, offset, self.file.endian, self.file.ni);
                 if result.is_err() {
                     self.failed = true;
                 }
@@ -556,12 +609,25 @@ impl Iterator for Segments<'_> {
     }
 }
 
-fn read_summary(bytes: &[u8], offset: usize, endian: Endian) -> Result<Segment> {
+fn read_summary(bytes: &[u8], offset: usize, endian: Endian, ni: u32) -> Result<Segment> {
     let short = EphemerisError::Malformed("summary beyond end of file");
     let start_et = read_f64(bytes, offset, endian).ok_or_else(|| short.clone())?;
     let end_et = read_f64(bytes, offset + 8, endian).ok_or_else(|| short.clone())?;
     let int_at =
         |i: usize| read_i32(bytes, offset + 16 + 4 * i, endian).ok_or_else(|| short.clone());
+    if ni == 5 {
+        // Binary PCK: the body takes the target slot; there is no centre.
+        return Ok(Segment {
+            start_et,
+            end_et,
+            target: int_at(0)?,
+            center: 0,
+            frame: int_at(1)?,
+            data_type: int_at(2)?,
+            start_word: int_at(3)?.max(0) as u32,
+            end_word: int_at(4)?.max(0) as u32,
+        });
+    }
     Ok(Segment {
         start_et,
         end_et,
