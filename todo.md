@@ -164,9 +164,9 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] Body/barycenter hierarchy (Sun, planets, Moon, EMB, Earth-Moon offset)
 - [ ] Memory-mapped and in-memory loading; `no_std` slice-based API — PARTIAL: in-memory and byte-slice APIs; no memory mapping
 - [x] Decide how data files are obtained (user-supplied path / download helper); document licensing of JPL data — DECIDED (ADR-004): user-supplied paths only; no data files and no download helper ship with the crate.
-- [ ] Light-time correction and apparent positions — PARTIAL: one-iteration light time only; no apparent positions
-- [ ] Validate against JPL Horizons reference values
-- [ ] **M2: `tptplan astro ephemeris` computes Jupiter's position to sub-arcsecond accuracy for any timestamp**
+- [ ] Light-time correction and apparent positions — PARTIAL: `ephemeris::astrometric` gives the converged light-time corrected direction (RA, Dec, distance, light time, no stellar aberration), which agrees with JPL Horizons astrometric positions to 0.015 arcsec at five epochs (`test_ephemeris_horizons.py`). Apparent positions (stellar aberration, light deflection) are not implemented
+- [x] Validate against JPL Horizons reference values — DONE for astrometric RA and Dec of Jupiter and Saturn at 2017, 2025 and 1950 (kernel-dependent: the test needs `TPT_SPK_KERNEL`, a user-supplied DE440-style kernel). Measured maximum 0.014 arcsec, against Horizons' own output precision of 0.036 arcsec. Geometric states agree with an independent SPK evaluation (jplephem) to 0.05 km
+- [ ] **M2: `tptplan astro ephemeris` computes Jupiter's position to sub-arcsecond accuracy for any timestamp** — the astrometric direction is sub-arcsecond at the sampled epochs (see above); it is not checked for every timestamp in the kernel, so the milestone stays open. The CLI command is `tptplan ephemeris query jupiter EPOCH --kernel PATH --astrometric`
 
 ### Phase 2 wrap-up
 - [x] Earth-Sun distance helper (used by the climate/irradiance data-flow example)
@@ -220,7 +220,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] `tptplan array math` (expression evaluation, lazy, output to Zarr/NetCDF3) — PARTIAL but complete for the grammar: `+ - * /`, unary minus, parentheses and scalar operands. Output is a float64 Zarr array (chunk by chunk, v2 or v3) or a NetCDF-3 file when the name ends in `.nc` (the whole result is held in memory for that case).
 - [x] `tptplan array convert` (Zarr <-> NetCDF3) — numeric int8/int16/int32/float32/float64 only; a NetCDF-3 file becomes a Zarr group with one array per variable, and a Zarr array or flat group becomes a NetCDF-3 file; no CF time decoding, NetCDF-4, or remote paths
 - [ ] `tptplan astro convert` (time scales and coordinate frames) — PARTIAL: utc, tai, tt and tdb (TDB through the full series, geocentre); frames icrs, galactic, ecliptic (mean J2000), and the mean and true ecliptic of date (with `--epoch`, TT); no TCB, TCG or UT1 and no other frames
-- [ ] `tptplan ephemeris query` (body, epoch, observer, output frame) — PARTIAL: needs an SPK kernel; the successful query path is untested
+- [ ] `tptplan ephemeris query` (body, epoch, observer, output frame) — PARTIAL: with a kernel, the geometric query (agreeing with jplephem to 0.05 km) and `--astrometric` (agreeing with Horizons to 0.015 arcsec) both work; the kernel is user-supplied
 - [x] Progress reporting, error messages, exit codes
 - [x] CLI integration tests; man pages / help text
 - [ ] Prebuilt binaries for Linux/macOS/Windows (release workflow)

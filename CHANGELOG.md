@@ -83,6 +83,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Read-only HDF5 subset in `tpt-planetary-array` (`hdf5`): groups, datasets and
   attributes of files written with the default HDF5 format, with deflate, shuffle
   and fletcher32 filters. Checked against h5py fixtures.
+- Astrometric directions from an SPK kernel (`ephemeris::astrometric`, and
+  `tptplan ephemeris query --astrometric`), with a converged light time. Checked
+  against JPL Horizons at five epochs (0.015 arcsec maximum).
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
   coefficients; matches `erfa.nut00b` to 1e-13 rad.
 - Atmospheric refraction for Alt/Az: the ERFA `refco` constants
