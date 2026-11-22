@@ -232,6 +232,10 @@ pub enum EphemerisCommand {
         /// Path to a DE440-style DAF/SPK file. Required.
         #[arg(long)]
         kernel: Option<std::path::PathBuf>,
+        /// Print the astrometric direction (RA and Dec, light-time corrected,
+        /// no aberration) instead of the geometric ICRS state.
+        #[arg(long)]
+        astrometric: bool,
     },
 }
 
@@ -351,6 +355,7 @@ fn run(cli: Cli) -> ExitCode {
                 observer,
                 frame,
                 kernel,
+                astrometric,
             } => finish(ephemeris_cmd::query(
                 &ephemeris_cmd::QueryArgs {
                     body: &body,
@@ -358,6 +363,7 @@ fn run(cli: Cli) -> ExitCode {
                     observer: &observer,
                     frame: &frame,
                     kernel: kernel.as_deref(),
+                    astrometric,
                 },
                 format,
             )),

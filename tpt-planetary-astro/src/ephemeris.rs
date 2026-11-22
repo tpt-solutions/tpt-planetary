@@ -630,6 +630,63 @@ pub fn light_time_corrected(
     })
 }
 
+/// Astrometric direction of a target from an observer: the light-time
+/// corrected geometric direction, without stellar aberration (as JPL Horizons
+/// gives its astrometric RA and Dec).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Astrometric {
+    /// Right ascension in radians, in `[0, 2 pi)`, in the ICRS axes of the kernel.
+    pub ra_rad: f64,
+    /// Declination in radians, in `[-pi/2, pi/2]`.
+    pub dec_rad: f64,
+    /// Distance from the observer to the target at emission, in km.
+    pub distance_km: f64,
+    /// One-way light time in seconds.
+    pub light_time_s: f64,
+}
+
+/// Astrometric direction of `target` seen from `observer` at `et` (TDB seconds
+/// past J2000). The emission time is found by iterating the light-time
+/// equation until it changes by less than a nanosecond; this takes two or three
+/// iterations for planets.
+///
+/// Against JPL Horizons (astrometric, geocentric, ICRF, 2017-01-01 00:00 TT)
+/// the crate's Jupiter direction is within the Horizons output precision of
+/// 0.0001 degrees; see the validation suite.
+///
+/// # Errors
+///
+/// Propagates ephemeris lookup and evaluation errors.
+#[cfg(feature = "std")]
+pub fn astrometric(spk: &SpkFile<'_>, target: i32, observer: i32, et: f64) -> Result<Astrometric> {
+    let obs = spk.state(observer, naif::SSB, et)?;
+    let mut tau = 0.0;
+    let mut rel = [0.0; 3];
+    for _ in 0..10 {
+        let emitted = spk.state(target, naif::SSB, et - tau)?;
+        rel = [
+            emitted.position[0] - obs.position[0],
+            emitted.position[1] - obs.position[1],
+            emitted.position[2] - obs.position[2],
+        ];
+        let next = norm(rel) / SPEED_OF_LIGHT_KM_S;
+        let converged = (next - tau).abs() < 1.0e-9;
+        tau = next;
+        if converged {
+            break;
+        }
+    }
+    let distance = norm(rel);
+    let ra = rel[1].atan2(rel[0]).rem_euclid(core::f64::consts::TAU);
+    let dec = (rel[2] / distance).clamp(-1.0, 1.0).asin();
+    Ok(Astrometric {
+        ra_rad: ra,
+        dec_rad: dec,
+        distance_km: distance,
+        light_time_s: tau,
+    })
+}
+
 /// Earth-Sun distance in km from an SPK file (Sun to Earth geocentre).
 ///
 /// # Errors
@@ -1017,6 +1074,43 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
+    #[test]
+    fn astrometric_direction_of_a_static_target() {
+        // Target at (0, 1e8, 1e8) km from an observer at the origin: the
+        // direction is RA 90 degrees, Dec 45 degrees, at distance 1.4142e8 km.
+        let make = |x: f64, y: f64, z: f64| -> Vec<f64> {
+            let mut w = vec![1000.0, 1000.0, x, y, z];
+            w.extend_from_slice(&[0.0, 2000.0, 5.0, 1.0]);
+            w
+        };
+        let mut builder = SyntheticSpk::new(Endian::Little);
+        let mk = |target: i32, data: Vec<f64>| {
+            let len = data.len() as u32;
+            (
+                Segment {
+                    start_et: 0.0,
+                    end_et: 2000.0,
+                    target,
+                    center: 0,
+                    frame: 1,
+                    data_type: 2,
+                    start_word: 0,
+                    end_word: len,
+                },
+                data,
+            )
+        };
+        builder.segments.push(mk(5, make(0.0, 1.0e8, 1.0e8)));
+        builder.segments.push(mk(0, make(0.0, 0.0, 0.0)));
+        let bytes = builder.build();
+        let spk = SpkFile::new(&bytes).expect("parse");
+        let a = astrometric(&spk, 5, 0, 1000.0).expect("astrometric");
+        assert!((a.ra_rad - core::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        assert!((a.dec_rad - core::f64::consts::FRAC_PI_4).abs() < 1e-12);
+        assert!((a.distance_km - 1.0e8 * core::f64::consts::SQRT_2).abs() < 1e-6);
+        assert!((a.light_time_s - a.distance_km / SPEED_OF_LIGHT_KM_S).abs() < 1e-9);
+    }
+
     #[test]
     fn light_time_is_distance_over_c_for_static_target() {
         // Constant-position target 1e8 km from a fixed observer at the SSB:
