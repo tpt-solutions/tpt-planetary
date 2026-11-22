@@ -40,7 +40,7 @@ mod writer;
 #[cfg(test)]
 mod tests;
 
-pub use cf::{Calendar, CfDateTime, TimeUnit, TimeUnits};
+pub use cf::{Calendar, CfDateTime, TimeUnit, TimeUnits, calendar_month_labels};
 pub use reader::Reader;
 pub use writer::Writer;
 

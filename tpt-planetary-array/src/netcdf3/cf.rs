@@ -273,6 +273,16 @@ pub fn time_units(reader: &Reader<'_>, variable: &str) -> Result<TimeUnits> {
     TimeUnits::parse(units, calendar)
 }
 
+/// Calendar month labels (0 for January to 11 for December) of time offsets,
+/// for use as group labels with `Expr::group_mean` (the labels are per index
+/// along the time axis, so the result has one entry per offset).
+pub fn calendar_month_labels(units: &TimeUnits, offsets: &[f64]) -> Result<Vec<u32>> {
+    offsets
+        .iter()
+        .map(|&o| units.decode(o).map(|t| u32::from(t.month) - 1))
+        .collect()
+}
+
 /// Reads variable `variable` and decodes each value as a CF time.
 pub fn decode_times(reader: &Reader<'_>, variable: &str) -> Result<Vec<CfDateTime>> {
     let units = time_units(reader, variable)?;

@@ -542,6 +542,20 @@ fn cf_noleap_calendar() {
 }
 
 #[test]
+fn cf_month_labels_feed_group_mean() {
+    // Daily offsets over 2000 (a leap year) with the calendar month of each day.
+    let units = TimeUnits::parse("days since 2000-01-01", Calendar::Standard).unwrap();
+    let offsets: Vec<f64> = (0..366).map(f64::from).collect();
+    let labels = super::cf::calendar_month_labels(&units, &offsets).unwrap();
+    assert_eq!(labels[0], 0); // 2000-01-01
+    assert_eq!(labels[31], 1); // 2000-02-01
+    assert_eq!(labels[59], 1); // 2000-02-29
+    assert_eq!(labels[60], 2); // 2000-03-01
+    assert_eq!(labels[365], 11); // 2000-12-31
+    assert_eq!(labels.iter().filter(|&&m| m == 1).count(), 29);
+}
+
+#[test]
 fn cf_encode_inverts_decode() {
     let units = TimeUnits::parse("hours since 1990-06-15 06:30:00", Calendar::Standard).unwrap();
     for offset in [0.0, 1.0, 1234.5, -77.25, 100_000.0] {
