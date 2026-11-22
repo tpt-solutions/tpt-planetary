@@ -238,32 +238,37 @@ impl Codec for ZstdCodec {
     }
 
     fn decode(&self, input: &[u8]) -> Result<Vec<u8>> {
-        use ruzstd::io::Read;
+        zstd_decode(input)
+    }
+}
 
-        let mut out = Vec::new();
-        let mut rest = input;
-        loop {
-            let mut decoder = ruzstd::decoding::StreamingDecoder::new(rest)
-                .map_err(|e| Error::Codec(format!("zstd: {e}")))?;
-            decoder
-                .read_to_end(&mut out)
-                .map_err(|e| Error::Codec(format!("zstd: {e}")))?;
-            let (remaining, frame) = decoder.into_parts();
-            // ruzstd reports the stored and recomputed checksums but does not
-            // compare them, so a mismatch is checked here.
-            if let (Some(stored), Some(calculated)) = (
-                frame.get_checksum_from_data(),
-                frame.get_calculated_checksum(),
-            ) && stored != calculated
-            {
-                return Err(Error::Codec(format!(
-                    "zstd: content checksum mismatch (stored {stored:#010x}, computed {calculated:#010x})"
-                )));
-            }
-            rest = remaining;
-            if rest.is_empty() {
-                return Ok(out);
-            }
+/// Decodes one or more concatenated zstd frames, verifying content checksums.
+pub(crate) fn zstd_decode(input: &[u8]) -> Result<Vec<u8>> {
+    use ruzstd::io::Read;
+
+    let mut out = Vec::new();
+    let mut rest = input;
+    loop {
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(rest)
+            .map_err(|e| Error::Codec(format!("zstd: {e}")))?;
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| Error::Codec(format!("zstd: {e}")))?;
+        let (remaining, frame) = decoder.into_parts();
+        // ruzstd reports the stored and recomputed checksums but does not
+        // compare them, so a mismatch is checked here.
+        if let (Some(stored), Some(calculated)) = (
+            frame.get_checksum_from_data(),
+            frame.get_calculated_checksum(),
+        ) && stored != calculated
+        {
+            return Err(Error::Codec(format!(
+                "zstd: content checksum mismatch (stored {stored:#010x}, computed {calculated:#010x})"
+            )));
+        }
+        rest = remaining;
+        if rest.is_empty() {
+            return Ok(out);
         }
     }
 }

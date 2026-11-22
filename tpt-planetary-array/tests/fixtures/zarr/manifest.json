@@ -1,0 +1,27 @@
+{
+ "zarr_python": "3.4.2",
+ "numcodecs": "0.17.1",
+ "arrays": [
+  "v2_blosc_blosclz_shuffle",
+  "v2_blosc_blosclz_split_big",
+  "v2_blosc_lz4_shuffle",
+  "v2_blosc_lz4_split_big",
+  "v2_blosc_zlib_bitshuffle",
+  "v2_blosc_zlib_split_big",
+  "v2_blosc_zstd_shuffle",
+  "v2_blosc_zstd_split_big",
+  "v2_f64_nan_data",
+  "v2_float32_nan_fill_missing",
+  "v2_gzip",
+  "v2_int16_partial",
+  "v2_lz4",
+  "v2_none",
+  "v2_zlib",
+  "v2_zstd",
+  "v3_bytes_gzip",
+  "v3_bytes_zstd",
+  "v3_partial_missing",
+  "v3_sharded_f64",
+  "v3_transpose_bytes"
+ ]
+}

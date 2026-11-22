@@ -1,0 +1,17 @@
+{
+  "shape": [
+    6,
+    10
+  ],
+  "chunks": [
+    2,
+    4
+  ],
+  "dtype": "<i2",
+  "fill_value": -7,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}

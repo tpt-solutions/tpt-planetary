@@ -8,7 +8,7 @@
 //! |-------:|-----:|---------------------------------------------------------|
 //! | 0      | 1    | `version` (format version, 1 or 2 accepted)             |
 //! | 1      | 1    | `versionlz` (compressor version, informational)         |
-//! | 2      | 1    | `flags`: 0x01 byte shuffle, 0x02 memcpyed, 0x04 bit shuffle, 0x08 don't split, bits 5-7 compressor (0 blosclz, 1 lz4, 2 snappy, 3 zlib, 4 zstd) |
+//! | 2      | 1    | `flags`: 0x01 byte shuffle, 0x02 memcpyed, 0x04 bit shuffle, 0x10 don't split, bits 5-7 compressor (0 blosclz, 1 lz4, 2 snappy, 3 zlib, 4 zstd) |
 //! | 3      | 1    | `typesize` (element size used by the shuffle filters)   |
 //! | 4      | 4    | `nbytes`: uncompressed size                             |
 //! | 8      | 4    | `blocksize`: uncompressed bytes per block               |
@@ -25,13 +25,15 @@
 //! shuffle over the whole block.
 //!
 //! Supported: memcpy, LZ4 (raw LZ4 block, via `lz4_flex`) and zlib (via
-//! `miniz_oxide`), with byte and bit shuffle. Rejected with
-//! [`Error::Unsupported`]: blosclz, snappy and zstd streams. Encoding is not
-//! implemented.
+//! `miniz_oxide`), zstd (`ruzstd`), blosclz and snappy, with byte and bit
+//! shuffle. Encoding is not implemented.
 //!
-//! The split rule and the tail-bytes placement are taken from the c-blosc1
-//! sources as remembered; no reference frames were available to check them, so
-//! the test frames are built from the layout above.
+//! Verification: zarr-python fixtures (`tests/zarr_conformance.rs`) cover every
+//! back end with single-stream and multi-stream (split) blocks, and read through
+//! the whole Zarr path. The blosclz decoder and the don't-split flag (0x10) were
+//! fixed against those fixtures. Snappy is checked against the raw-format
+//! reference encoder (cramjam) in `codec/testdata`. The far-distance blosclz
+//! form is rejected as unsupported because it is not verified.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -52,7 +54,7 @@ pub const HEADER_LEN: usize = 16;
 const FLAG_SHUFFLE: u8 = 0x01;
 const FLAG_MEMCPYED: u8 = 0x02;
 const FLAG_BITSHUFFLE: u8 = 0x04;
-const FLAG_DONT_SPLIT: u8 = 0x08;
+const FLAG_DONT_SPLIT: u8 = 0x10;
 
 const COMPRESSOR_BLOSCLZ: u8 = 0;
 const COMPRESSOR_LZ4: u8 = 1;
@@ -128,6 +130,184 @@ impl BloscHeader {
     }
 }
 
+/// Decodes a blosclz stream (the FastLZ-derived format used by Blosc) of
+/// `expected` uncompressed bytes.
+///
+/// The first control byte is read with its top three bits cleared (`& 31`).
+/// A control byte below 32 starts a literal run of `ctrl + 1` bytes. Otherwise
+/// it starts a back-reference: the top three bits give the length (7 means
+/// extra length bytes follow, summed while they equal 255), the low five bits
+/// are the high part of the distance, and the next byte is the low part. The
+/// copied length is the sum plus 2, and the distance is the 13-bit value plus 1.
+///
+/// Verified against the blosclz streams of zarr-python fixtures (see
+/// `tests/zarr_conformance.rs`). The 16-bit far-distance form, used for
+/// distances beyond 8191, is not verified and is rejected as unsupported.
+fn blosclz_decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
+    let bad = || Error::Codec("blosc: malformed blosclz stream".into());
+    let mut out: Vec<u8> = Vec::with_capacity(expected);
+    if data.is_empty() {
+        return Err(bad());
+    }
+    let mut ctrl = (data[0] & 31) as usize;
+    let mut ip = 1usize;
+    loop {
+        if ctrl < 32 {
+            let n = ctrl + 1;
+            let lit = data.get(ip..ip + n).ok_or_else(bad)?;
+            out.extend_from_slice(lit);
+            ip += n;
+        } else {
+            let mut len = ctrl >> 5;
+            let ofs = (ctrl & 31) << 8;
+            if len == 7 {
+                loop {
+                    let code = *data.get(ip).ok_or_else(bad)? as usize;
+                    ip += 1;
+                    len += code;
+                    if code != 255 {
+                        break;
+                    }
+                }
+            }
+            let code = *data.get(ip).ok_or_else(bad)? as usize;
+            ip += 1;
+            len += 2;
+            if code == 255 && ofs == 31 << 8 {
+                return Err(Error::Unsupported(
+                    "blosclz far back-reference (distance above 8191)".into(),
+                ));
+            }
+            let dist = ofs + code + 1;
+            if dist > out.len() {
+                return Err(bad());
+            }
+            let start = out.len() - dist;
+            // Copy byte by byte: the source may overlap the output being written.
+            for k in 0..len {
+                let b = out[start + k];
+                out.push(b);
+            }
+        }
+        if out.len() > expected {
+            return Err(bad());
+        }
+        if ip >= data.len() {
+            break;
+        }
+        ctrl = data[ip] as usize;
+        ip += 1;
+    }
+    if out.len() != expected {
+        return Err(Error::Codec(format!(
+            "blosc: blosclz stream produced {} bytes, expected {expected}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// Decodes a raw Snappy stream (the block format, no framing) of `expected`
+/// uncompressed bytes, as used by Blosc's snappy back end.
+///
+/// The stream starts with the uncompressed length as a little-endian varint,
+/// then tagged elements. The low two bits of a tag select a literal (0) or a
+/// copy with a 1-, 2- or 4-byte offset (1, 2, 3). Copies may overlap the output.
+fn snappy_decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
+    let bad = |what: &str| Error::Codec(format!("blosc: malformed snappy stream: {what}"));
+    let mut ip = 0usize;
+    let mut declared: usize = 0;
+    let mut shift = 0u32;
+    loop {
+        let b = *data.get(ip).ok_or_else(|| bad("truncated length"))?;
+        ip += 1;
+        if shift > 28 {
+            return Err(bad("length too long"));
+        }
+        declared |= ((b & 0x7f) as usize) << shift;
+        shift += 7;
+        if b & 0x80 == 0 {
+            break;
+        }
+    }
+    if declared != expected {
+        return Err(Error::Codec(format!(
+            "blosc: snappy stream declares {declared} bytes, expected {expected}"
+        )));
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(expected);
+    while ip < data.len() {
+        let tag = data[ip];
+        ip += 1;
+        match tag & 3 {
+            0 => {
+                let mut len = (tag >> 2) as usize;
+                if len >= 60 {
+                    let nbytes = len - 59;
+                    let mut v = 0usize;
+                    for k in 0..nbytes {
+                        let b = *data.get(ip + k).ok_or_else(|| bad("truncated literal"))?;
+                        v |= (b as usize) << (8 * k);
+                    }
+                    ip += nbytes;
+                    len = v;
+                }
+                let len = len + 1;
+                let lit = data
+                    .get(ip..ip + len)
+                    .ok_or_else(|| bad("truncated literal"))?;
+                out.extend_from_slice(lit);
+                ip += len;
+            }
+            kind => {
+                let (len, offset) = match kind {
+                    1 => {
+                        let b = *data.get(ip).ok_or_else(|| bad("truncated copy"))?;
+                        ip += 1;
+                        let len = ((tag >> 2) & 7) as usize + 4;
+                        let offset = (((tag >> 5) as usize) << 8) | b as usize;
+                        (len, offset)
+                    }
+                    2 => {
+                        let b = data.get(ip..ip + 2).ok_or_else(|| bad("truncated copy"))?;
+                        ip += 2;
+                        (
+                            (tag >> 2) as usize + 1,
+                            u16::from_le_bytes([b[0], b[1]]) as usize,
+                        )
+                    }
+                    _ => {
+                        let b = data.get(ip..ip + 4).ok_or_else(|| bad("truncated copy"))?;
+                        ip += 4;
+                        (
+                            (tag >> 2) as usize + 1,
+                            u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
+                        )
+                    }
+                };
+                if offset == 0 || offset > out.len() {
+                    return Err(bad("copy offset outside the output"));
+                }
+                if out.len() + len > expected {
+                    return Err(bad("output longer than declared"));
+                }
+                let start = out.len() - offset;
+                for k in 0..len {
+                    let byte = out[start + k];
+                    out.push(byte);
+                }
+            }
+        }
+    }
+    if out.len() != expected {
+        return Err(Error::Codec(format!(
+            "blosc: snappy stream produced {} bytes, expected {expected}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
 /// Decodes one stream of `expected` uncompressed bytes.
 fn decompress_stream(compressor: u8, data: &[u8], expected: usize) -> Result<Vec<u8>> {
     match compressor {
@@ -153,8 +333,20 @@ fn decompress_stream(compressor: u8, data: &[u8], expected: usize) -> Result<Vec
             }
             Ok(out)
         }
+        COMPRESSOR_ZSTD => {
+            let out = super::compress::zstd_decode(data)?;
+            if out.len() != expected {
+                return Err(Error::Codec(format!(
+                    "blosc: zstd stream produced {} bytes, expected {expected}",
+                    out.len()
+                )));
+            }
+            Ok(out)
+        }
+        COMPRESSOR_BLOSCLZ => blosclz_decompress(data, expected),
+        COMPRESSOR_SNAPPY => snappy_decompress(data, expected),
         _ => Err(Error::Unsupported(format!(
-            "blosc compressor code {compressor} (only lz4 and zlib are decoded)"
+            "blosc compressor code {compressor}"
         ))),
     }
 }
@@ -219,12 +411,8 @@ pub fn decode_frame(input: &[u8]) -> Result<Vec<u8>> {
     }
     let compressor = h.compressor();
     match compressor {
-        COMPRESSOR_LZ4 | COMPRESSOR_ZLIB => {}
-        COMPRESSOR_BLOSCLZ => {
-            return Err(Error::Unsupported("blosc blosclz compressor".into()));
-        }
-        COMPRESSOR_SNAPPY => return Err(Error::Unsupported("blosc snappy compressor".into())),
-        COMPRESSOR_ZSTD => return Err(Error::Unsupported("blosc zstd compressor".into())),
+        COMPRESSOR_LZ4 | COMPRESSOR_ZLIB | COMPRESSOR_BLOSCLZ | COMPRESSOR_ZSTD
+        | COMPRESSOR_SNAPPY => {}
         other => {
             return Err(Error::InvalidMetadata(format!(
                 "blosc compressor code {other}"
@@ -282,19 +470,140 @@ pub fn decode_frame(input: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// The Zarr v2 `blosc` compressor. Decoding only.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BloscCodec;
+/// Shuffle mode of a Blosc frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BloscShuffle {
+    /// No shuffle.
+    None,
+    /// Byte shuffle (`shuffle = 1` in Zarr metadata).
+    Byte,
+    /// Bit shuffle (`shuffle = 2`).
+    Bit,
+}
+
+/// Blosc codec. Decodes every back end that [`decode_frame`] supports, and
+/// encodes LZ4, zlib and zstd frames as one block, split per byte plane the way
+/// c-blosc does for blocks of at least 128 elements per plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BloscCodec {
+    /// Compressor code to write, or `None` for back ends that are decode-only.
+    compressor: Option<u8>,
+    clevel: u8,
+    shuffle: BloscShuffle,
+    typesize: usize,
+}
+
+/// Compressor code for a Blosc `cname`. `None` for back ends that decode but
+/// do not encode (blosclz, snappy). Unknown names are an error.
+fn compressor_code(name: &str) -> Result<Option<u8>> {
+    match name {
+        "lz4" => Ok(Some(COMPRESSOR_LZ4)),
+        "zlib" => Ok(Some(COMPRESSOR_ZLIB)),
+        "zstd" => Ok(Some(COMPRESSOR_ZSTD)),
+        "blosclz" | "snappy" => Ok(None),
+        "lz4hc" => Ok(Some(COMPRESSOR_LZ4)),
+        other => Err(Error::InvalidMetadata(format!(
+            "unknown blosc cname '{other}'"
+        ))),
+    }
+}
+
+/// Compresses one stream with the given compressor code.
+fn compress_stream(compressor: u8, clevel: u8, data: &[u8]) -> Result<Vec<u8>> {
+    match compressor {
+        COMPRESSOR_LZ4 => Ok(lz4_flex::block::compress(data)),
+        COMPRESSOR_ZLIB => Ok(miniz_oxide::deflate::compress_to_vec_zlib(
+            data,
+            clevel.clamp(1, 9),
+        )),
+        COMPRESSOR_ZSTD => {
+            let mut out = Vec::new();
+            ruzstd::encoding::compress(data, &mut out, ruzstd::encoding::CompressionLevel::Fastest);
+            Ok(out)
+        }
+        other => Err(Error::Unsupported(format!("blosc encode code {other}"))),
+    }
+}
+
+impl BloscCodec {
+    /// Encodes `input` as one Blosc frame (a single block, so `blocksize` is the
+    /// input length). Falls back to a memcpy frame when compression does not
+    /// make the data smaller.
+    fn encode_frame(&self, input: &[u8]) -> Result<Vec<u8>> {
+        let nbytes = input.len();
+        let nbytes_u32 = u32::try_from(nbytes)
+            .map_err(|_| Error::Unsupported("blosc encode of more than 4 GiB".into()))?;
+        let typesize = self.typesize.clamp(1, 255);
+        let mut flags = match self.shuffle {
+            BloscShuffle::None => 0,
+            BloscShuffle::Byte => FLAG_SHUFFLE,
+            BloscShuffle::Bit => FLAG_BITSHUFFLE,
+        };
+        let compressor = self.compressor.ok_or_else(|| {
+            Error::Unsupported(
+                "blosc encode supports lz4, zlib and zstd (blosclz and snappy decode only)".into(),
+            )
+        })?;
+        flags |= compressor << 5;
+        let header = |flags: u8, cbytes: usize| -> Vec<u8> {
+            let mut h = vec![2u8, 1, flags, typesize as u8];
+            h.extend_from_slice(&nbytes_u32.to_le_bytes());
+            h.extend_from_slice(&nbytes_u32.to_le_bytes());
+            h.extend_from_slice(&(cbytes as u32).to_le_bytes());
+            h
+        };
+        if nbytes == 0 {
+            return Ok(header(flags, HEADER_LEN));
+        }
+
+        let prepared = match self.shuffle {
+            BloscShuffle::None => input.to_vec(),
+            BloscShuffle::Byte => ShuffleCodec::new(typesize)?.encode(input)?,
+            BloscShuffle::Bit => super::bitshuffle::bit_shuffle(input, typesize),
+        };
+        // One block holds the whole input, so the split rule of the decoder applies to nbytes.
+        let nsplits = if typesize <= MAX_SPLITS && nbytes / typesize >= MIN_BUFFERSIZE {
+            typesize
+        } else {
+            1
+        };
+        let neblock = nbytes / nsplits;
+        let mut block = Vec::with_capacity(nbytes + 4 * nsplits);
+        for part in 0..nsplits {
+            let chunk = &prepared[part * neblock..(part + 1) * neblock];
+            let packed = compress_stream(compressor, self.clevel, chunk)?;
+            let stream: &[u8] = if packed.len() >= neblock {
+                chunk
+            } else {
+                &packed
+            };
+            block.extend_from_slice(&(stream.len() as u32).to_le_bytes());
+            block.extend_from_slice(stream);
+        }
+        block.extend_from_slice(&prepared[nsplits * neblock..]);
+
+        let table_end = HEADER_LEN + 4;
+        let cbytes = table_end + block.len();
+        if cbytes >= HEADER_LEN + nbytes {
+            // Incompressible: store the input as it is.
+            let mut out = header(flags | FLAG_MEMCPYED, HEADER_LEN + nbytes);
+            out.extend_from_slice(input);
+            return Ok(out);
+        }
+        let mut out = header(flags, cbytes);
+        out.extend_from_slice(&(table_end as u32).to_le_bytes());
+        out.extend_from_slice(&block);
+        Ok(out)
+    }
+}
 
 impl Codec for BloscCodec {
     fn name(&self) -> &str {
         "blosc"
     }
 
-    fn encode(&self, _input: &[u8]) -> Result<Vec<u8>> {
-        Err(Error::Unsupported(
-            "blosc encode is not implemented (decode only)".into(),
-        ))
+    fn encode(&self, input: &[u8]) -> Result<Vec<u8>> {
+        self.encode_frame(input)
     }
 
     fn decode(&self, input: &[u8]) -> Result<Vec<u8>> {
@@ -302,8 +611,52 @@ impl Codec for BloscCodec {
     }
 }
 
-pub(crate) fn blosc_factory(_config: &Value, _dtype: &DType) -> Result<Box<dyn Codec>> {
-    Ok(Box::new(BloscCodec))
+/// Builds the codec from a Zarr `blosc` compressor object: `cname` (`lz4`,
+/// `zlib` or `zstd` for encoding), `clevel` (default 5), and `shuffle` (0 none,
+/// 1 byte, 2 bit, or the names `noshuffle`, `shuffle`, `bitshuffle`). The
+/// element size comes from the data type.
+pub(crate) fn blosc_factory(config: &Value, dtype: &DType) -> Result<Box<dyn Codec>> {
+    let cname = config.get("cname").and_then(Value::as_str).unwrap_or("lz4");
+    let compressor = compressor_code(cname)?;
+    let clevel = config
+        .get("clevel")
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .min(9) as u8;
+    let shuffle = match config.get("shuffle") {
+        None | Some(Value::Null) => BloscShuffle::Byte,
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(0) => BloscShuffle::None,
+            Some(1) => BloscShuffle::Byte,
+            Some(2) => BloscShuffle::Bit,
+            _ => {
+                return Err(Error::InvalidMetadata(
+                    "blosc shuffle must be 0, 1 or 2".into(),
+                ));
+            }
+        },
+        Some(Value::String(s)) => match s.as_str() {
+            "noshuffle" => BloscShuffle::None,
+            "shuffle" => BloscShuffle::Byte,
+            "bitshuffle" => BloscShuffle::Bit,
+            other => {
+                return Err(Error::InvalidMetadata(format!(
+                    "unknown blosc shuffle '{other}'"
+                )));
+            }
+        },
+        Some(_) => {
+            return Err(Error::InvalidMetadata(
+                "blosc shuffle has the wrong type".into(),
+            ));
+        }
+    };
+    Ok(Box::new(BloscCodec {
+        compressor,
+        clevel,
+        shuffle,
+        typesize: dtype.item_size(),
+    }))
 }
 
 #[cfg(test)]
@@ -441,11 +794,56 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_compressors_are_rejected() {
-        for code in [COMPRESSOR_BLOSCLZ, COMPRESSOR_SNAPPY, COMPRESSOR_ZSTD] {
-            let f = frame(code << 5, 1, 4, 4, &[stream(&[1, 2, 3, 4])]);
-            assert!(matches!(decode_frame(&f), Err(Error::Unsupported(_))));
+    fn snappy_raw_stream_matches_reference_encoder() {
+        let raw = include_bytes!("testdata/snappy_cramjam.raw");
+        let packed = include_bytes!("testdata/snappy_cramjam.bin");
+        assert_eq!(snappy_decompress(packed, raw.len()).unwrap(), raw.to_vec());
+    }
+
+    #[test]
+    fn snappy_copy_element_kinds() {
+        // Literal "abcd", then a copy of length 4 at offset 4, once per copy kind.
+        let copy1 = [8u8, 0x0c, b'a', b'b', b'c', b'd', 0x01, 0x04];
+        let copy2 = [8u8, 0x0c, b'a', b'b', b'c', b'd', 0x0e, 0x04, 0x00];
+        let copy4 = [
+            8u8, 0x0c, b'a', b'b', b'c', b'd', 0x0f, 0x04, 0x00, 0x00, 0x00,
+        ];
+        for packed in [&copy1[..], &copy2[..], &copy4[..]] {
+            assert_eq!(snappy_decompress(packed, 8).unwrap(), b"abcdabcd".to_vec());
         }
+        // Overlapping copy: "a" then length 7 at offset 1 gives eight a's.
+        let overlap = [8u8, 0x00, b'a', 0x0d, 0x01];
+        assert_eq!(snappy_decompress(&overlap, 8).unwrap(), vec![b'a'; 8]);
+        // Offsets before the start and length mismatches are errors.
+        assert!(snappy_decompress(&[4u8, 0x00, b'a', 0x01, 0x05], 4).is_err());
+        assert!(snappy_decompress(&copy2, 9).is_err());
+    }
+
+    #[test]
+    fn snappy_frame_decodes_through_blosc() {
+        let raw = include_bytes!("testdata/snappy_cramjam.raw");
+        let packed = include_bytes!("testdata/snappy_cramjam.bin");
+        let f = frame(
+            COMPRESSOR_SNAPPY << 5,
+            1,
+            raw.len() as u32,
+            raw.len() as u32,
+            &[stream(packed)],
+        );
+        assert_eq!(decode_frame(&f).unwrap(), raw.to_vec());
+    }
+
+    #[test]
+    fn unsupported_compressors_are_rejected() {
+        // A blosclz literal run: control byte 3 copies four bytes.
+        let f = frame(
+            COMPRESSOR_BLOSCLZ << 5,
+            1,
+            4,
+            4,
+            &[stream(&[3, 1, 2, 3, 4])],
+        );
+        assert_eq!(decode_frame(&f).unwrap(), vec![1, 2, 3, 4]);
         let f = frame(7 << 5, 1, 4, 4, &[stream(&[1, 2, 3, 4])]);
         assert!(matches!(decode_frame(&f), Err(Error::InvalidMetadata(_))));
     }
@@ -463,12 +861,84 @@ mod tests {
         assert!(decode_frame(&f).is_err(), "byte and bit shuffle together");
     }
 
+    fn codec(cname: &str, shuffle: BloscShuffle, typesize: usize) -> BloscCodec {
+        BloscCodec {
+            compressor: compressor_code(cname).unwrap(),
+            clevel: 5,
+            shuffle,
+            typesize,
+        }
+    }
+
     #[test]
-    fn encode_is_unsupported() {
+    fn encode_round_trips_every_compressor_and_shuffle() {
+        // Compressible float-like data (8-byte elements, slowly varying), 4096 elements.
+        let data: Vec<u8> = (0..4096u32)
+            .flat_map(|i| (i as f64 * 0.25).to_le_bytes())
+            .collect();
+        for cname in ["lz4", "zlib", "zstd"] {
+            for shuffle in [BloscShuffle::None, BloscShuffle::Byte, BloscShuffle::Bit] {
+                let c = codec(cname, shuffle, 8);
+                let frame = c.encode(&data).unwrap();
+                assert!(
+                    frame.len() < data.len(),
+                    "{cname} {shuffle:?} did not compress"
+                );
+                assert_eq!(decode_frame(&frame).unwrap(), data, "{cname} {shuffle:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_falls_back_to_memcpy_and_handles_tails_and_empty_input() {
+        // Pseudo-random bytes do not compress: the frame is a memcpy frame.
+        let mut x: u32 = 0x1234_5678;
+        let noise: Vec<u8> = (0..999)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        let frame = codec("lz4", BloscShuffle::Byte, 4).encode(&noise).unwrap();
+        assert_ne!(frame[2] & FLAG_MEMCPYED, 0);
+        assert_eq!(decode_frame(&frame).unwrap(), noise);
+        // Length not a multiple of the element size: the tail is stored unchanged.
+        let odd: Vec<u8> = (0..1001u32).map(|i| (i / 3) as u8).collect();
+        let frame = codec("zlib", BloscShuffle::Byte, 8).encode(&odd).unwrap();
+        assert_eq!(decode_frame(&frame).unwrap(), odd);
+        // Empty input is a header-only frame that decodes to nothing.
+        let frame = codec("lz4", BloscShuffle::None, 8).encode(&[]).unwrap();
+        assert_eq!(frame.len(), HEADER_LEN);
+        assert!(decode_frame(&frame).unwrap().is_empty());
+    }
+
+    #[test]
+    fn encode_rejects_back_ends_it_does_not_write() {
+        let cfg = serde_json::json!({"cname": "blosclz"});
+        let dtype = DType::FLOAT64;
+        // blosclz is accepted for reading; writing it is refused.
+        let c = blosc_factory(&cfg, &dtype).unwrap();
+        assert!(matches!(c.encode(&[1, 2, 3]), Err(Error::Unsupported(_))));
+        let cfg = serde_json::json!({"cname": "nope"});
         assert!(matches!(
-            BloscCodec.encode(&[1]),
-            Err(Error::Unsupported(_))
+            blosc_factory(&cfg, &dtype),
+            Err(Error::InvalidMetadata(_))
         ));
+    }
+
+    #[test]
+    fn factory_reads_zarr_compressor_options() {
+        let dtype = DType::FLOAT64;
+        let cfg = serde_json::json!({"id": "blosc", "cname": "zstd", "clevel": 3, "shuffle": 2});
+        let c = blosc_factory(&cfg, &dtype).unwrap();
+        let data = vec![7u8; 2048];
+        assert_eq!(decode_frame(&c.encode(&data).unwrap()).unwrap(), data);
+        let cfg = serde_json::json!({"cname": "lz4", "shuffle": "noshuffle"});
+        assert!(blosc_factory(&cfg, &dtype).is_ok());
+        let cfg = serde_json::json!({"cname": "lz4", "shuffle": 9});
+        assert!(blosc_factory(&cfg, &dtype).is_err());
     }
 }
 
