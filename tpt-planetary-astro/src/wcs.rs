@@ -216,11 +216,14 @@ impl Projection {
                 Some((phi, theta))
             }
             Self::Car => {
+                // The native longitude is x itself, so it must lie in [-pi, pi]
+                // (WCSLIB reports points outside it as invalid).
                 let yr = y / R2D;
-                if yr.abs() > FRAC_PI_2 + DOMAIN_TOL {
+                let xr = x / R2D;
+                if yr.abs() > FRAC_PI_2 + DOMAIN_TOL || xr.abs() > PI + DOMAIN_TOL {
                     return None;
                 }
-                Some((x / R2D, yr))
+                Some((xr, yr))
             }
             Self::Mol => {
                 let xr = x / R2D;
@@ -413,6 +416,138 @@ impl SipPoly {
     }
 }
 
+/// Number of TPV polynomial terms, `PV1_0` to `PV1_39` (and `PV2_0` to `PV2_39`).
+const TPV_TERMS: usize = 40;
+
+/// One TPV polynomial term: `x^p y^q`, or the radius `r^n` with `r = sqrt(x^2 + y^2)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TpvTerm {
+    Xy(u32, u32),
+    Radius(u32),
+}
+
+/// The term of TPV index `k` (Calabretta and Valdes' TPV ordering, as in wcslib).
+/// Terms are grouped by total order; within an order, the power of `x` falls
+/// from the highest to zero. The radius terms come last in their order.
+fn tpv_term(k: usize) -> TpvTerm {
+    match k {
+        0 => TpvTerm::Xy(0, 0),
+        1 => TpvTerm::Xy(1, 0),
+        2 => TpvTerm::Xy(0, 1),
+        3 => TpvTerm::Radius(1),
+        4..=6 => {
+            let j = (k - 4) as u32;
+            TpvTerm::Xy(2 - j, j)
+        }
+        7..=10 => {
+            let j = (k - 7) as u32;
+            TpvTerm::Xy(3 - j, j)
+        }
+        11 => TpvTerm::Radius(3),
+        12..=16 => {
+            let j = (k - 12) as u32;
+            TpvTerm::Xy(4 - j, j)
+        }
+        17..=22 => {
+            let j = (k - 17) as u32;
+            TpvTerm::Xy(5 - j, j)
+        }
+        23 => TpvTerm::Radius(5),
+        24..=30 => {
+            let j = (k - 24) as u32;
+            TpvTerm::Xy(6 - j, j)
+        }
+        31..=38 => {
+            let j = (k - 31) as u32;
+            TpvTerm::Xy(7 - j, j)
+        }
+        _ => TpvTerm::Radius(7),
+    }
+}
+
+/// All TPV monomials at `(x, y)`, in index order.
+fn tpv_monomials(x: f64, y: f64) -> [f64; TPV_TERMS] {
+    let r = x.hypot(y);
+    let mut out = [0.0; TPV_TERMS];
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = match tpv_term(k) {
+            TpvTerm::Xy(p, q) => x.powi(p as i32) * y.powi(q as i32),
+            TpvTerm::Radius(n) => r.powi(n as i32),
+        };
+    }
+    out
+}
+
+/// TPV distortion. The polynomial variables are the pixel-scale intermediate
+/// coordinates `x = ix / CDELT1` and `y = iy / CDELT2`, where `(ix, iy)` are
+/// the linear intermediate coordinates (in degrees, from `CD` or `PC` and
+/// `CDELT`). The distorted coordinates are `xi = CDELT1 * sum PV1_k M_k(x, y)`
+/// and `eta = CDELT2 * sum PV2_k M_k(y, x)`, where `M_k` is the TPV monomial of
+/// index `k`. The eta polynomial swaps x and y: `PV2_1` is the coefficient of
+/// `y` and `PV2_2` of `x`. The identity is `PV1_1 = 1` and `PV2_1 = 1`. With a
+/// `CD` matrix, `CDELT` is 1 and the variables are the degrees themselves. The
+/// projection (TAN) then acts on `(xi, eta)`. Checked against wcslib (via
+/// astropy) in the Python validation suite.
+#[derive(Debug, Clone, PartialEq)]
+struct Tpv {
+    xi: [f64; TPV_TERMS],
+    eta: [f64; TPV_TERMS],
+    cdelt: [f64; 2],
+}
+
+impl Tpv {
+    /// The raw polynomials at pixel-scale `(x, y)`.
+    fn poly(&self, x: f64, y: f64) -> (f64, f64) {
+        let mx = tpv_monomials(x, y);
+        let my = tpv_monomials(y, x);
+        let xi = self.xi.iter().zip(&mx).map(|(c, m)| c * m).sum();
+        let eta = self.eta.iter().zip(&my).map(|(c, m)| c * m).sum();
+        (xi, eta)
+    }
+
+    /// Applies the distortion: linear intermediate `(ix, iy)` to `(xi, eta)`.
+    fn forward(&self, ix: f64, iy: f64) -> (f64, f64) {
+        let (x, y) = (ix / self.cdelt[0], iy / self.cdelt[1]);
+        let (p, q) = self.poly(x, y);
+        (self.cdelt[0] * p, self.cdelt[1] * q)
+    }
+
+    /// Inverts the distortion by Newton's method on the polynomials, starting
+    /// from the identity. Returns `None` if it does not converge (the map is
+    /// singular or far from the identity).
+    fn inverse(&self, xi: f64, eta: f64) -> Option<(f64, f64)> {
+        let (tx, ty) = (xi / self.cdelt[0], eta / self.cdelt[1]);
+        let (mut x, mut y) = (tx, ty);
+        for _ in 0..SIP_MAX_ITER {
+            let (fx, fy) = self.poly(x, y);
+            let (ex, ey) = (fx - tx, fy - ty);
+            if ex.abs() <= 1e-13 * (1.0 + tx.abs()) && ey.abs() <= 1e-13 * (1.0 + ty.abs()) {
+                return Some((x * self.cdelt[0], y * self.cdelt[1]));
+            }
+            // Central differences for the Jacobian.
+            let h = 1e-7;
+            let (xp, yp) = self.poly(x + h, y);
+            let (xm, ym) = self.poly(x - h, y);
+            let (a00, a10) = ((xp - xm) / (2.0 * h), (yp - ym) / (2.0 * h));
+            let (xp, yp) = self.poly(x, y + h);
+            let (xm, ym) = self.poly(x, y - h);
+            let (a01, a11) = ((xp - xm) / (2.0 * h), (yp - ym) / (2.0 * h));
+            let det = a00 * a11 - a01 * a10;
+            if det == 0.0 || !det.is_finite() {
+                return None;
+            }
+            let dx = (a11 * ex - a01 * ey) / det;
+            let dy = (-a10 * ex + a00 * ey) / det;
+            x -= dx;
+            y -= dy;
+            if !x.is_finite() || !y.is_finite() {
+                return None;
+            }
+        }
+        None
+    }
+}
+
 /// SIP distortion: forward polynomials `A`, `B` (pixel to intermediate pixel)
 /// and optional inverse polynomials `AP`, `BP` (intermediate to pixel).
 #[derive(Debug, Clone, PartialEq)]
@@ -437,6 +572,7 @@ pub struct Wcs {
     /// Celestial declination of the native pole, `delta_p`, in radians.
     delta_p: f64,
     sip: Option<Sip>,
+    tpv: Option<Tpv>,
 }
 
 impl Wcs {
@@ -483,28 +619,38 @@ impl Wcs {
 
         // Solve sin(delta0) = sin(theta0) sin(delta_p) + cos(theta0) cos(phi0 - phi_p) cos(delta_p)
         // with phi0 = 0 for the reference point.
-        let delta_p = match params.latpole {
-            Some(v) => v.to_radians(),
-            None => {
-                let a = theta0.sin();
-                let b = theta0.cos() * (-phi_p).cos();
-                let r = a.hypot(b);
-                if r == 0.0 {
-                    return Err(WcsError::NoLatPole);
+        // The native pole latitude is fixed by CRVAL up to two roots. LATPOLE,
+        // when given, selects the root nearest to it (as WCSLIB does); when it
+        // is absent, the root nearest +pi/2 is used.
+        let delta_p = {
+            let a = theta0.sin();
+            let b = theta0.cos() * (-phi_p).cos();
+            let r = a.hypot(b);
+            if r == 0.0 {
+                return Err(WcsError::NoLatPole);
+            }
+            let gamma = b.atan2(a);
+            let s = (delta0.sin() / r).clamp(-1.0, 1.0);
+            let base = s.asin();
+            let candidates: Vec<f64> = [base - gamma, PI - base - gamma]
+                .into_iter()
+                .filter(|c| (-PI / 2.0 - 1e-12..=PI / 2.0 + 1e-12).contains(c))
+                .collect();
+            match params.latpole {
+                Some(v) => {
+                    let target = v.to_radians();
+                    candidates
+                        .into_iter()
+                        .min_by(|x, y| (x - target).abs().total_cmp(&(y - target).abs()))
+                        .ok_or(WcsError::NoLatPole)?
                 }
-                let gamma = b.atan2(a);
-                let s = (delta0.sin() / r).clamp(-1.0, 1.0);
-                let base = s.asin();
-                // Two candidate roots; pick the one in [-pi/2, pi/2] closest to +pi/2.
-                let candidates = [base - gamma, PI - base - gamma];
-                candidates
+                None => candidates
                     .into_iter()
-                    .filter(|c| (-PI / 2.0 - 1e-12..=PI / 2.0 + 1e-12).contains(c))
                     .fold(None::<f64>, |best, c| match best {
                         Some(b) if b >= c => Some(b),
                         _ => Some(c),
                     })
-                    .ok_or(WcsError::NoLatPole)?
+                    .ok_or(WcsError::NoLatPole)?,
             }
         };
 
@@ -526,6 +672,7 @@ impl Wcs {
             alpha_p,
             delta_p,
             sip: None,
+            tpv: None,
         })
     }
 
@@ -559,9 +706,10 @@ impl Wcs {
     /// assert!((dec - 90.0).abs() < 1e-9);
     /// ```
     pub fn from_header(text: &str) -> Result<Self> {
-        let (params, sip) = parse_header(text)?;
+        let (params, sip, tpv) = parse_header(text)?;
         let mut wcs = Self::new(params)?;
         wcs.sip = sip;
+        wcs.tpv = tpv;
         Ok(wcs)
     }
 
@@ -579,6 +727,10 @@ impl Wcs {
         };
         let ix = self.cd[0][0] * u + self.cd[0][1] * v;
         let iy = self.cd[1][0] * u + self.cd[1][1] * v;
+        let (ix, iy) = match &self.tpv {
+            Some(tpv) => tpv.forward(ix, iy),
+            None => (ix, iy),
+        };
         let (phi, theta) = self.projection.inverse(ix, iy)?;
         let (alpha, delta) = self.native_to_celestial(phi, theta);
         // `rem_euclid` can return exactly 360.0 for a tiny negative input
@@ -596,6 +748,10 @@ impl Wcs {
     pub fn world_to_pixel(&self, lon_deg: f64, lat_deg: f64) -> Option<(f64, f64)> {
         let (phi, theta) = self.celestial_to_native(lon_deg.to_radians(), lat_deg.to_radians());
         let (ix, iy) = self.projection.forward(phi, theta)?;
+        let (ix, iy) = match &self.tpv {
+            Some(tpv) => tpv.inverse(ix, iy)?,
+            None => (ix, iy),
+        };
         let (u, v) = self.intermediate_to_offset(ix, iy)?;
         Some((u + self.crpix[0], v + self.crpix[1]))
     }
@@ -813,7 +969,7 @@ impl SipBuild {
     }
 }
 
-fn parse_header(text: &str) -> Result<(WcsParams, Option<Sip>)> {
+fn parse_header(text: &str) -> Result<(WcsParams, Option<Sip>, Option<Tpv>)> {
     let mut crpix = [0.0; 2];
     let mut crval = [0.0; 2];
     let mut cdelt = [1.0; 2];
@@ -824,6 +980,8 @@ fn parse_header(text: &str) -> Result<(WcsParams, Option<Sip>)> {
     let mut lonpole = None;
     let mut latpole = None;
     let mut pv2 = [None, None];
+    let mut tpv_xi = [0.0; TPV_TERMS];
+    let mut tpv_eta = [0.0; TPV_TERMS];
     let mut sip = SipBuild::default();
 
     for card in cards(text) {
@@ -866,12 +1024,24 @@ fn parse_header(text: &str) -> Result<(WcsParams, Option<Sip>)> {
                     if let (Value::Text(t), 1..=2) = (&value, idx) {
                         ctype[idx - 1] = Some(t.to_string());
                     }
-                } else if let Some(idx) = key
+                } else if let Some(k) = key
+                    .strip_prefix("PV1_")
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
+                    if let (Some(n), true) = (number, k < TPV_TERMS) {
+                        tpv_xi[k] = n;
+                    }
+                } else if let Some(k) = key
                     .strip_prefix("PV2_")
                     .and_then(|s| s.parse::<usize>().ok())
                 {
-                    if let (Some(n), 1..=2) = (number, idx) {
-                        pv2[idx - 1] = Some(n);
+                    if let Some(n) = number {
+                        if (1..=2).contains(&k) {
+                            pv2[k - 1] = Some(n);
+                        }
+                        if k < TPV_TERMS {
+                            tpv_eta[k] = n;
+                        }
                     }
                 } else if let Some((name, rest)) = parse_sip_key(key) {
                     sip.apply(name, rest, number);
@@ -894,7 +1064,16 @@ fn parse_header(text: &str) -> Result<(WcsParams, Option<Sip>)> {
     if code1 != code2 {
         return Err(WcsError::MismatchedProjection);
     }
-    let projection = Projection::from_code(&code1).ok_or(WcsError::UnsupportedProjection(code1))?;
+    // A TPV header is a TAN projection with the polynomial distortion applied.
+    let is_tpv = code1 == "TPV";
+    let code = if is_tpv { "TAN".to_string() } else { code1 };
+    let projection = Projection::from_code(&code).ok_or(WcsError::UnsupportedProjection(code))?;
+    let tpv = is_tpv.then_some(Tpv {
+        xi: tpv_xi,
+        eta: tpv_eta,
+        // With a CD matrix the variables are already in degrees.
+        cdelt: if have_cd { [1.0, 1.0] } else { cdelt },
+    });
 
     let linear = if have_cd {
         cd
@@ -914,7 +1093,7 @@ fn parse_header(text: &str) -> Result<(WcsParams, Option<Sip>)> {
         latpole,
         pv2,
     };
-    Ok((params, sip.finish()))
+    Ok((params, sip.finish(), tpv))
 }
 
 fn projection_code(ctype: Option<&str>, keyword: &'static str) -> Result<String> {
@@ -1464,5 +1643,76 @@ AP_2_0 = {}\nBP_0_2 = {}\n",
         let a = with_one.pixel_to_world(600.0, 500.0).expect("d");
         let b = lin.pixel_to_world(600.0, 500.0).expect("d");
         assert!(angle_diff_deg(a.0, b.0) < 1e-14 && (a.1 - b.1).abs() < 1e-14);
+    }
+}
+
+#[cfg(test)]
+mod tpv_tests {
+    use super::*;
+
+    fn header(ctype: &str, extra: &str) -> String {
+        format!(
+            "CRVAL1  = 10.0\nCRVAL2  = 20.0\nCRPIX1  = 100.0\nCRPIX2  = 100.0\n\
+CD1_1   = -0.0001\nCD1_2   = 0.0\nCD2_1   = 0.0\nCD2_2   = 0.0001\n\
+CTYPE1  = 'RA---{ctype}'\nCTYPE2  = 'DEC--{ctype}'\n{extra}"
+        )
+    }
+
+    fn pixels() -> Vec<(f64, f64)> {
+        vec![(100.0, 100.0), (90.5, 110.0), (120.0, 95.0), (60.0, 140.0)]
+    }
+
+    #[test]
+    fn tpv_identity_matches_tan() {
+        let tan = Wcs::from_header(&header("TAN", "")).unwrap();
+        let tpv = Wcs::from_header(&header("TPV", "PV1_1 = 1.0\nPV2_1 = 1.0\n")).unwrap();
+        for (x, y) in pixels() {
+            let a = tan.pixel_to_world(x, y).unwrap();
+            let b = tpv.pixel_to_world(x, y).unwrap();
+            assert!(
+                (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12,
+                "({x},{y})"
+            );
+        }
+    }
+
+    #[test]
+    fn tpv_quadratic_terms_act_and_invert() {
+        // A quadratic term in xi changes the result, and world-to-pixel inverts it.
+        let extra = "PV1_1 = 1.0\nPV2_1 = 1.0\nPV1_4 = 2.0e3\nPV2_6 = -1.5e3\n";
+        let w = Wcs::from_header(&header("TPV", extra)).unwrap();
+        let tan = Wcs::from_header(&header("TAN", "")).unwrap();
+        let (x, y) = (85.0, 112.0);
+        let distorted = w.pixel_to_world(x, y).unwrap();
+        let plain = tan.pixel_to_world(x, y).unwrap();
+        assert!(
+            (distorted.1 - plain.1).abs() > 1e-7,
+            "distortion had no effect"
+        );
+        let (bx, by) = w.world_to_pixel(distorted.0, distorted.1).unwrap();
+        assert!(
+            (bx - x).abs() < 1e-6 && (by - y).abs() < 1e-6,
+            "({bx},{by})"
+        );
+    }
+
+    #[test]
+    fn tpv_index_ordering_matches_the_reference_table() {
+        // Spot checks of the term table: index 4 is x^2, 8 is x^2 y, 24 is x^6,
+        // 39 is r^7, and the eta polynomial swaps x and y.
+        assert_eq!(tpv_term(4), TpvTerm::Xy(2, 0));
+        assert_eq!(tpv_term(8), TpvTerm::Xy(2, 1));
+        assert_eq!(tpv_term(24), TpvTerm::Xy(6, 0));
+        assert_eq!(tpv_term(30), TpvTerm::Xy(0, 6));
+        assert_eq!(tpv_term(39), TpvTerm::Radius(7));
+        let mut eta = [0.0; TPV_TERMS];
+        eta[4] = 1.0; // PV2_4 multiplies y^2
+        let t = Tpv {
+            xi: [0.0; TPV_TERMS],
+            eta,
+            cdelt: [1.0, 1.0],
+        };
+        let (_, e) = t.poly(0.3, 0.7);
+        assert!((e - 0.49).abs() < 1e-15, "eta {e}");
     }
 }
