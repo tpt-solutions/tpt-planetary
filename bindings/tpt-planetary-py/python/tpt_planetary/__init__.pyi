@@ -224,6 +224,12 @@ class SpkKernel:
         Light-time corrected, without stellar aberration (as JPL Horizons' astrometric RA and Dec).
         """
         ...
+    def orientation(
+        self, body_frame: int, et: float
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+        """Rotation from J2000 axes to the body-fixed frame ``body_frame`` (3000 for ITRF93),
+        from a binary PCK, as a row-major 3 x 3 tuple (SPICE's pxform)."""
+        ...
     def apparent(self, target: int, observer: int, et: float) -> dict[str, float]:
         """Apparent direction: ``ra_deg``, ``dec_deg``, ``light_time_s``.
 

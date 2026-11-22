@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use tpt_planetary_astro::ephemeris::{
     SpkFile, apparent_direction, astrometric, et_from_tdb_jd, read_file,
@@ -98,6 +98,24 @@ impl SpkKernel {
         d.set_item("distance_km", a.distance_km)?;
         d.set_item("light_time_s", a.light_time_s)?;
         Ok(d)
+    }
+
+    /// Rotation from J2000 axes to the body-fixed frame `body_frame` (3000 for
+    /// ITRF93) at `et`, from a binary PCK: a row-major 3 x 3 tuple of tuples, as
+    /// SPICE's pxform gives it.
+    fn orientation<'py>(
+        &self,
+        py: Python<'py>,
+        body_frame: i32,
+        et: f64,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let m = tpt_planetary_astro::pck::orientation_matrix(&self.file()?, body_frame, et)
+            .map_err(ephemeris_error)?;
+        let rows = m
+            .iter()
+            .map(|r| PyTuple::new(py, r.to_vec()))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, rows)
     }
 
     /// Apparent direction of `target` from `observer` at `et`: the astrometric
