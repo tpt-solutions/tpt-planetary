@@ -91,6 +91,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Read-only HDF5 subset, and blosclz far back-references (distances above 8191).
 - FITS binary tables: `Hdu::table` reads the fixed-width column forms with
   scaling and nulls, checked against astropy.
+- Apparent directions from an SPK kernel (`ephemeris::apparent_direction`, and
+  `tptplan ephemeris query --apparent`): light deflection by the Sun and annual
+  aberration on the astrometric direction. Checked against Horizons apparent
+  positions at five epochs (0.11 arcsec maximum).
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
   coefficients; matches `erfa.nut00b` to 1e-13 rad.
 - Atmospheric refraction for Alt/Az: the ERFA `refco` constants
