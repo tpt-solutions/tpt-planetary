@@ -7,6 +7,7 @@
 //! Galactic to ecliptic goes through ICRS. Coordinates are `LON,LAT` in
 //! degrees. Other frames and time scales are reported as not implemented (exit 3).
 
+use tpt_planetary_astro::eop::{EopError, EopTable, FINALS2000A_COLUMNS, parse_finals2000a};
 use tpt_planetary_astro::frames::{Galactic, Icrs, MeanEcliptic, SkyCoord};
 use tpt_planetary_astro::nutation::{
     TrueEclipticOfDate, icrs_to_true_ecliptic_of_date, true_ecliptic_of_date_to_icrs,
@@ -19,6 +20,8 @@ use tpt_planetary_core::Error as CoreError;
 use tpt_planetary_core::jd::JulianDate;
 use tpt_planetary_core::leap::EMBEDDED;
 use tpt_planetary_core::scale::{CivilTime, Epoch, Tai, Tt, Utc};
+
+use std::path::Path;
 
 use crate::iso::{format_timestamp, parse_timestamp};
 use crate::json;
@@ -178,7 +181,7 @@ fn frame_convert(
 
 /// Names of scales and frames that are known but not implemented yet.
 const UNIMPLEMENTED: &[&str] = &[
-    "tcb", "tcg", "ut1", "icrs", "fk5", "fk4", "galactic", "ecliptic", "gcrs", "itrs", "altaz",
+    "tcb", "tcg", "icrs", "fk5", "fk4", "galactic", "ecliptic", "gcrs", "itrs", "altaz",
 ];
 
 /// A time scale supported by this command.
@@ -192,6 +195,8 @@ pub enum Scale {
     Tt,
     /// Barycentric Dynamical Time.
     Tdb,
+    /// Universal Time, UT1 (needs an IERS EOP file for UT1 - UTC).
+    Ut1,
 }
 
 impl Scale {
@@ -201,6 +206,7 @@ impl Scale {
             Scale::Tai => "tai",
             Scale::Tt => "tt",
             Scale::Tdb => "tdb",
+            Scale::Ut1 => "ut1",
         }
     }
 }
@@ -213,16 +219,17 @@ pub fn parse_scale(name: &str) -> Result<Scale, Failure> {
         "tai" => Ok(Scale::Tai),
         "tt" => Ok(Scale::Tt),
         "tdb" => Ok(Scale::Tdb),
+        "ut1" => Ok(Scale::Ut1),
         other if UNIMPLEMENTED.contains(&other) => Err(Failure::new(
             EXIT_NOT_IMPLEMENTED,
             format!(
                 "scale or frame '{name}' is not implemented yet; astro convert supports \
-                 the time scales utc, tai, tt and tdb only"
+                 the time scales utc, tai, tt, tdb and ut1 only"
             ),
         )),
         _ => Err(Failure::new(
             EXIT_USAGE,
-            format!("unknown time scale '{name}': expected utc, tai, tt or tdb"),
+            format!("unknown time scale '{name}': expected utc, tai, tt, tdb or ut1"),
         )),
     }
 }
@@ -304,6 +311,7 @@ fn convert(e: AnyEpoch, to: Scale) -> Result<AnyEpoch, CoreError> {
         Scale::Tai => AnyEpoch::Tai(to_tai(e)?),
         Scale::Tt => AnyEpoch::Tt(to_tt(e)?),
         Scale::Tdb => AnyEpoch::Tdb(to_tdb(e)?),
+        Scale::Ut1 => unreachable!("UT1 conversions are routed through convert_ut1"),
     })
 }
 
@@ -319,7 +327,7 @@ pub fn convert_command(
     to: &str,
     format: OutputFormat,
 ) -> Result<String, Failure> {
-    convert_command_at(value, from, to, None, format)
+    convert_command_at(value, from, to, None, None, format)
 }
 
 /// As `convert_command`, with an optional `epoch` (an ISO 8601 TT timestamp)
@@ -329,6 +337,7 @@ pub fn convert_command_at(
     from: &str,
     to: &str,
     epoch: Option<&str>,
+    eop: Option<&Path>,
     format: OutputFormat,
 ) -> Result<String, Failure> {
     match (frame_name(from), frame_name(to)) {
@@ -355,6 +364,9 @@ pub fn convert_command_at(
     let from = parse_scale(from)?;
     let to = parse_scale(to)?;
     let ct = parse_timestamp(value).map_err(|m| Failure::new(EXIT_USAGE, m))?;
+    if from == Scale::Ut1 || to == Scale::Ut1 {
+        return convert_ut1(&ct, from, to, eop, format);
+    }
 
     let input = match from {
         Scale::Utc => Epoch::<Utc>::from_civil(ct, &EMBEDDED).map(AnyEpoch::Utc),
@@ -362,6 +374,7 @@ pub fn convert_command_at(
         Scale::Tt => Epoch::<Tt>::from_civil(ct).map(AnyEpoch::Tt),
         // The calendar reading of a TDB timestamp is the same Julian date.
         Scale::Tdb => Epoch::<Tt>::from_civil(ct).map(|t| AnyEpoch::Tdb(t.jd())),
+        Scale::Ut1 => unreachable!("UT1 inputs are routed through convert_ut1"),
     }
     .map_err(|e| core_failure("invalid timestamp", e))?;
 
@@ -369,10 +382,13 @@ pub fn convert_command_at(
     let out_ct = output
         .civil()
         .map_err(|e| core_failure("cannot format result", e))?;
-    let timestamp = format_timestamp(&out_ct);
-    let jd = output.jd();
+    Ok(render_time(&out_ct, output.jd(), to, format))
+}
 
-    Ok(match format {
+/// Formats a converted time: the calendar form and the two-part Julian date.
+fn render_time(ct: &CivilTime, jd: JulianDate, to: Scale, format: OutputFormat) -> String {
+    let timestamp = format_timestamp(ct);
+    match format {
         OutputFormat::Table => format!(
             "{timestamp} {}\njd1 {}\njd2 {}",
             to.label().to_ascii_uppercase(),
@@ -385,7 +401,96 @@ pub fn convert_command_at(
             ("jd1", jd.day().to_string()),
             ("jd2", jd.fraction().to_string()),
         ]),
-    })
+    }
+}
+
+/// Converts to or from UT1. UT1 is bridged through UTC: a UT1 input becomes
+/// UTC with the offset UT1 - UTC from the IERS table, and a UT1 output is UTC
+/// plus that offset. The table comes from an IERS finals2000A file given by
+/// `--eop`; its rows must be daily around the epoch.
+fn convert_ut1(
+    ct: &CivilTime,
+    from: Scale,
+    to: Scale,
+    eop: Option<&Path>,
+    format: OutputFormat,
+) -> Result<String, Failure> {
+    let path = eop.ok_or_else(|| {
+        Failure::new(
+            EXIT_USAGE,
+            "UT1 needs --eop FILE, an IERS finals2000A file, for UT1 - UTC".to_string(),
+        )
+    })?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        Failure::new(
+            EXIT_RUNTIME,
+            format!("cannot read EOP file '{}': {e}", path.display()),
+        )
+    })?;
+    let records = parse_finals2000a(&text, &FINALS2000A_COLUMNS).map_err(|e| {
+        Failure::new(
+            EXIT_RUNTIME,
+            format!("cannot parse EOP file '{}': {e}", path.display()),
+        )
+    })?;
+    let table = EopTable::new(&records)
+        .map_err(|e| Failure::new(EXIT_RUNTIME, format!("bad EOP table: {e}")))?;
+    let eop_err = |e: EopError| Failure::new(EXIT_RUNTIME, format!("UT1 - UTC: {e}"));
+
+    // The UTC epoch of the input.
+    let utc: Epoch<Utc> = match from {
+        Scale::Ut1 => {
+            // The calendar reading of a UT1 timestamp. The offset is taken at the
+            // UT1 epoch; the difference from the UTC epoch is far below a
+            // millisecond, since UT1 - UTC changes by about a millisecond a day.
+            let j = Epoch::<Tt>::from_civil(*ct)
+                .map_err(|e| core_failure("invalid timestamp", e))?
+                .jd();
+            let dut1 = table.ut1_minus_utc(mjd_of(j)).map_err(eop_err)?;
+            Epoch::<Utc>::from_jd(Epoch::<Tt>::from_jd(j).add_seconds(-dut1).jd())
+        }
+        Scale::Utc => Epoch::<Utc>::from_civil(*ct, &EMBEDDED)
+            .map_err(|e| core_failure("invalid timestamp", e))?,
+        other => {
+            let input = match other {
+                Scale::Tai => AnyEpoch::Tai(
+                    Epoch::<Tai>::from_civil(*ct)
+                        .map_err(|e| core_failure("invalid timestamp", e))?,
+                ),
+                Scale::Tt => AnyEpoch::Tt(
+                    Epoch::<Tt>::from_civil(*ct)
+                        .map_err(|e| core_failure("invalid timestamp", e))?,
+                ),
+                Scale::Tdb => AnyEpoch::Tdb(
+                    Epoch::<Tt>::from_civil(*ct)
+                        .map_err(|e| core_failure("invalid timestamp", e))?
+                        .jd(),
+                ),
+                Scale::Utc | Scale::Ut1 => unreachable!("handled above"),
+            };
+            to_utc(input).map_err(|e| core_failure("cannot convert", e))?
+        }
+    };
+
+    if to == Scale::Ut1 {
+        let j = utc.jd();
+        let (hi, lo) = table.utc_to_ut1(j.day(), j.fraction()).map_err(eop_err)?;
+        let out = Epoch::<Tt>::from_jd(JulianDate::new(hi, lo));
+        let out_ct = out
+            .to_civil()
+            .map_err(|e| core_failure("cannot format result", e))?;
+        return Ok(render_time(&out_ct, out.jd(), to, format));
+    }
+    let output = convert(AnyEpoch::Utc(utc), to).map_err(|e| core_failure("cannot convert", e))?;
+    let out_ct = output
+        .civil()
+        .map_err(|e| core_failure("cannot format result", e))?;
+    Ok(render_time(&out_ct, output.jd(), to, format))
+}
+
+/// Modified Julian Date of a two-part Julian date.
+fn mjd_of(j: JulianDate) -> f64 {
+    (j.day() - 2_400_000.5) + j.fraction()
 }
 
 #[cfg(test)]
@@ -397,13 +502,21 @@ mod tests {
         let no_epoch = convert_command("10,20", "icrs", "ecliptic-date", OutputFormat::Table);
         assert_eq!(no_epoch.unwrap_err().code, EXIT_USAGE);
         let at = Some("2024-06-01T12:00:00");
-        let date =
-            convert_command_at("10,20", "icrs", "ecliptic-date", at, OutputFormat::Table).unwrap();
+        let date = convert_command_at(
+            "10,20",
+            "icrs",
+            "ecliptic-date",
+            at,
+            None,
+            OutputFormat::Table,
+        )
+        .unwrap();
         let back = convert_command_at(
             date.split(' ').next().unwrap(),
             "ecliptic-date",
             "icrs",
             at,
+            None,
             OutputFormat::Table,
         )
         .unwrap();

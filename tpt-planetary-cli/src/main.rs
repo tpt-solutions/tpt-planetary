@@ -227,6 +227,9 @@ pub enum AstroCommand {
         /// `ecliptic-date` and `true-ecliptic-date`.
         #[arg(long)]
         epoch: Option<String>,
+        /// IERS finals2000A file (daily rows around the epoch), needed for UT1 - UTC.
+        #[arg(long, value_name = "PATH")]
+        eop: Option<std::path::PathBuf>,
     },
 }
 
@@ -386,11 +389,13 @@ fn run(cli: Cli) -> ExitCode {
                 from,
                 to,
                 epoch,
+                eop,
             } => finish(astro_cmd::convert_command_at(
                 &value,
                 &from,
                 &to,
                 epoch.as_deref(),
+                eop.as_deref(),
                 format,
             )),
         },
