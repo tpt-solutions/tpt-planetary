@@ -1,11 +1,11 @@
-//! `tptplan astro convert`: conversion between UTC, TAI and TT, and between
+//! `tptplan astro convert`: conversion between UTC, TAI, TT and TDB, and between
 //! the ICRS, Galactic and mean J2000 ecliptic frames.
 //!
 //! Time scales are the ones implemented in `tpt-planetary-core`. Frame
 //! conversions use the public `FrameTransform` impls of `tpt-planetary-astro`:
 //! ICRS to and from Galactic, and ICRS to and from the mean ecliptic of J2000.
 //! Galactic to ecliptic goes through ICRS. Coordinates are `LON,LAT` in
-//! degrees. Other frames and TDB are reported as not implemented (exit 3).
+//! degrees. Other frames and time scales are reported as not implemented (exit 3).
 
 use tpt_planetary_astro::frames::{Galactic, Icrs, MeanEcliptic, SkyCoord};
 use tpt_planetary_astro::nutation::{
@@ -14,6 +14,7 @@ use tpt_planetary_astro::nutation::{
 use tpt_planetary_astro::precession::{
     MeanEclipticOfDate, icrs_to_mean_ecliptic_of_date, mean_ecliptic_of_date_to_icrs,
 };
+use tpt_planetary_astro::time::{tdb_to_tt, tt_to_tdb};
 use tpt_planetary_core::Error as CoreError;
 use tpt_planetary_core::jd::JulianDate;
 use tpt_planetary_core::leap::EMBEDDED;
@@ -177,8 +178,7 @@ fn frame_convert(
 
 /// Names of scales and frames that are known but not implemented yet.
 const UNIMPLEMENTED: &[&str] = &[
-    "tdb", "tcb", "tcg", "ut1", "icrs", "fk5", "fk4", "galactic", "ecliptic", "gcrs", "itrs",
-    "altaz",
+    "tcb", "tcg", "ut1", "icrs", "fk5", "fk4", "galactic", "ecliptic", "gcrs", "itrs", "altaz",
 ];
 
 /// A time scale supported by this command.
@@ -190,6 +190,8 @@ pub enum Scale {
     Tai,
     /// Terrestrial Time.
     Tt,
+    /// Barycentric Dynamical Time.
+    Tdb,
 }
 
 impl Scale {
@@ -198,6 +200,7 @@ impl Scale {
             Scale::Utc => "utc",
             Scale::Tai => "tai",
             Scale::Tt => "tt",
+            Scale::Tdb => "tdb",
         }
     }
 }
@@ -209,16 +212,17 @@ pub fn parse_scale(name: &str) -> Result<Scale, Failure> {
         "utc" => Ok(Scale::Utc),
         "tai" => Ok(Scale::Tai),
         "tt" => Ok(Scale::Tt),
+        "tdb" => Ok(Scale::Tdb),
         other if UNIMPLEMENTED.contains(&other) => Err(Failure::new(
             EXIT_NOT_IMPLEMENTED,
             format!(
                 "scale or frame '{name}' is not implemented yet; astro convert supports \
-                 the time scales utc, tai and tt only"
+                 the time scales utc, tai, tt and tdb only"
             ),
         )),
         _ => Err(Failure::new(
             EXIT_USAGE,
-            format!("unknown time scale '{name}': expected utc, tai or tt"),
+            format!("unknown time scale '{name}': expected utc, tai, tt or tdb"),
         )),
     }
 }
@@ -229,6 +233,8 @@ enum AnyEpoch {
     Utc(Epoch<Utc>),
     Tai(Epoch<Tai>),
     Tt(Epoch<Tt>),
+    /// TDB, held as a Julian date (the core crate has no TDB scale type).
+    Tdb(JulianDate),
 }
 
 impl AnyEpoch {
@@ -237,6 +243,7 @@ impl AnyEpoch {
             AnyEpoch::Utc(e) => e.jd(),
             AnyEpoch::Tai(e) => e.jd(),
             AnyEpoch::Tt(e) => e.jd(),
+            AnyEpoch::Tdb(j) => j,
         }
     }
 
@@ -245,6 +252,7 @@ impl AnyEpoch {
             AnyEpoch::Utc(e) => e.to_civil(&EMBEDDED),
             AnyEpoch::Tai(e) => e.to_civil(),
             AnyEpoch::Tt(e) => e.to_civil(),
+            AnyEpoch::Tdb(j) => Epoch::<Tt>::from_jd(j).to_civil(),
         }
     }
 }
@@ -254,6 +262,7 @@ fn to_tai(e: AnyEpoch) -> Result<Epoch<Tai>, CoreError> {
         AnyEpoch::Utc(u) => u.to_scale(&EMBEDDED),
         AnyEpoch::Tai(t) => Ok(t),
         AnyEpoch::Tt(t) => t.to_scale(&EMBEDDED),
+        AnyEpoch::Tdb(_) => to_tt(e)?.to_scale(&EMBEDDED),
     }
 }
 
@@ -262,6 +271,21 @@ fn to_tt(e: AnyEpoch) -> Result<Epoch<Tt>, CoreError> {
         AnyEpoch::Utc(u) => u.to_scale(&EMBEDDED),
         AnyEpoch::Tai(t) => t.to_scale(&EMBEDDED),
         AnyEpoch::Tt(t) => Ok(t),
+        AnyEpoch::Tdb(j) => {
+            let (hi, lo) = tdb_to_tt(j.day(), j.fraction());
+            Ok(Epoch::from_jd(JulianDate::new(hi, lo)))
+        }
+    }
+}
+
+fn to_tdb(e: AnyEpoch) -> Result<JulianDate, CoreError> {
+    match e {
+        AnyEpoch::Tdb(j) => Ok(j),
+        other => {
+            let tt = to_tt(other)?.jd();
+            let (hi, lo) = tt_to_tdb(tt.day(), tt.fraction());
+            Ok(JulianDate::new(hi, lo))
+        }
     }
 }
 
@@ -270,6 +294,7 @@ fn to_utc(e: AnyEpoch) -> Result<Epoch<Utc>, CoreError> {
         AnyEpoch::Utc(u) => Ok(u),
         AnyEpoch::Tai(t) => t.to_scale(&EMBEDDED),
         AnyEpoch::Tt(t) => t.to_scale(&EMBEDDED),
+        AnyEpoch::Tdb(_) => to_tt(e)?.to_scale(&EMBEDDED),
     }
 }
 
@@ -278,6 +303,7 @@ fn convert(e: AnyEpoch, to: Scale) -> Result<AnyEpoch, CoreError> {
         Scale::Utc => AnyEpoch::Utc(to_utc(e)?),
         Scale::Tai => AnyEpoch::Tai(to_tai(e)?),
         Scale::Tt => AnyEpoch::Tt(to_tt(e)?),
+        Scale::Tdb => AnyEpoch::Tdb(to_tdb(e)?),
     })
 }
 
@@ -334,6 +360,8 @@ pub fn convert_command_at(
         Scale::Utc => Epoch::<Utc>::from_civil(ct, &EMBEDDED).map(AnyEpoch::Utc),
         Scale::Tai => Epoch::<Tai>::from_civil(ct).map(AnyEpoch::Tai),
         Scale::Tt => Epoch::<Tt>::from_civil(ct).map(AnyEpoch::Tt),
+        // The calendar reading of a TDB timestamp is the same Julian date.
+        Scale::Tdb => Epoch::<Tt>::from_civil(ct).map(|t| AnyEpoch::Tdb(t.jd())),
     }
     .map_err(|e| core_failure("invalid timestamp", e))?;
 
@@ -408,6 +436,22 @@ mod tests {
     }
 
     #[test]
+    fn tt_to_tdb_and_back_is_the_identity() {
+        // TDB - TT is about 1.7 ms at most, so the printed timestamp moves only
+        // in its last digits; converting back must give the input again.
+        let out = run("2017-01-01T00:01:09.184", "tt", "tdb");
+        let first = out.lines().next().unwrap();
+        assert!(first.ends_with(" TDB"), "{out}");
+        let stamp = first.split(' ').next().unwrap();
+        let back = run(stamp, "tdb", "tt");
+        let back_first = back.lines().next().unwrap();
+        assert!(
+            back_first.starts_with("2017-01-01T00:01:09.18") && back_first.ends_with(" TT"),
+            "{back}"
+        );
+    }
+
+    #[test]
     fn utc_to_tt_adds_tai_offset() {
         assert!(run("2017-01-01T00:00:00", "utc", "tt").starts_with("2017-01-01T00:01:09.184 TT"));
     }
@@ -420,7 +464,8 @@ mod tests {
     #[test]
     fn unimplemented_and_unknown_scales_have_distinct_codes() {
         assert_eq!(parse_scale("icrs").unwrap_err().code, EXIT_NOT_IMPLEMENTED);
-        assert_eq!(parse_scale("tdb").unwrap_err().code, EXIT_NOT_IMPLEMENTED);
+        assert_eq!(parse_scale("tdb").unwrap(), Scale::Tdb);
+        assert_eq!(parse_scale("tcb").unwrap_err().code, EXIT_NOT_IMPLEMENTED);
         assert_eq!(parse_scale("utx").unwrap_err().code, EXIT_USAGE);
     }
 

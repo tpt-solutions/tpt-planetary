@@ -305,9 +305,7 @@ fn spec_section7_dataflow_scaled_down() {
     let jd = tt.jd();
     let (tdb_hi, tdb_lo) = tt_to_tdb(jd.day(), jd.fraction());
     let dt_s = ((tdb_hi - jd.day()) + (tdb_lo - jd.fraction())) * 86_400.0;
-    // The approximation is the three leading terms of the TDB - TT series,
-    // each bounded by its amplitude, so |TDB - TT| <= 1.6929 ms. The bound
-    // 1.7 ms is used here.
+    // The full TDB - TT series peaks near 1.66 ms, so 1.7 ms is a valid bound.
     assert!(dt_s.abs() <= 1.7e-3, "|TDB-TT| = {dt_s} s exceeds bound");
     assert!(dt_s != 0.0, "TT -> TDB conversion did not change the epoch");
     assert_close(
