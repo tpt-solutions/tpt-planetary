@@ -12,8 +12,11 @@ is skipped without one. Tolerance: 0.15 arcsec per coordinate. Horizons rounds
 to 1e-5 degree (0.036 arcsec); the measured maximum difference is 0.11 arcsec,
 at 1950. The aberration is ERFA's eraAb, which includes the relativistic terms,
 and it changed the residual by less than 0.001 arcsec. The remaining RA offset
-of about +0.05 arcsec is not explained by the aberration model; its source
-(frame, light-time or kernel) is not identified.
+of about +0.05 arcsec is reproduced by an independent chain: pyerfa's ld, ab
+and pnm06a applied to the kernel vectors agree with the crate to 1e-4 arcsec.
+So the residual comes from the model, not the code. Light deflection moves it by
+up to 0.07 arcsec, and it is the leading candidate; Horizons' own treatment of
+deflection and aberration is not visible from outside.
 """
 
 from __future__ import annotations
