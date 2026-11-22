@@ -23,7 +23,9 @@ Cases:
   covers only orbits that are propagated without error.
 - Decay and eccentricity errors: high-mean-motion, high-eccentricity sets must
   produce the same error (or the same valid states) in both codes.
-- Deep space (period of 225 minutes or more) is rejected by the crate.
+- Deep space (period of 225 minutes or more, SDP4): element sets in the
+  one-day and half-day resonance bands and in non-resonant orbits, compared
+  with sgp4 at random times.
 - A corrupted checksum is rejected by the crate.
 """
 
@@ -282,11 +284,51 @@ def test_decay_and_eccentricity_errors_agree():
     assert not mismatches, mismatches[:5]
 
 
-def test_deep_space_is_rejected():
-    """Period of about 720 minutes: the crate returns DeepSpace; sgp4 would use SDP4."""
-    rng = np.random.default_rng(SEED + 3)
-    l1, l2 = random_elements(rng, 60001, 2.0, 2.0, 0.01, 0.02)
-    assert run_orbit_dump([(l1, l2, 0.0)]) == ["err DeepSpace"]
+def test_deep_space_matches_sgp4():
+    """SDP4 states agree with sgp4 for resonant and non-resonant deep-space orbits.
+
+    Mean motions: 1.0 to 1.3 rev/day (one-day resonance), 1.95 to 2.05 rev/day
+    (half-day resonance) and 2.2 to 6.0 rev/day (non-resonant, periods from
+    240 minutes). The same position and velocity tolerances as the near-Earth
+    test apply.
+    """
+    rng = np.random.default_rng(SEED + 4)
+    records: list[tuple[str, str, float]] = []
+    refs: list[tuple[np.ndarray, np.ndarray]] = []
+    skipped = 0
+    satnum = 70000
+    for n_lo, n_hi, count in [(1.0, 1.3, 40), (1.95, 2.05, 40), (2.2, 6.0, 80)]:
+        for _ in range(count):
+            satnum += 1
+            l1, l2 = random_elements(rng, satnum, n_lo, n_hi, 0.0, 0.2)
+            sat = Satrec.twoline2rv(l1, l2, WGS72)
+            for t in [float(rng.uniform(-1440.0, 1440.0)) for _ in range(3)]:
+                code, r, v = reference_state(sat, t)
+                if code != 0:
+                    skipped += 1
+                    continue
+                records.append((l1, l2, t))
+                refs.append((r, v))
+    assert skipped <= 0.05 * (len(records) + skipped), f"too many reference errors: {skipped}"
+
+    lines = run_orbit_dump(records)
+    max_pos_km = 0.0
+    max_vel_km_s = 0.0
+    failures = []
+    for (l1, l2, t), line, (r_ref, v_ref) in zip(records, lines, refs):
+        if not line.startswith("ok"):
+            failures.append(f"{t} min: {line}")
+            continue
+        r, v = parse_ok(line)
+        max_pos_km = max(max_pos_km, float(np.linalg.norm(r - r_ref)))
+        max_vel_km_s = max(max_vel_km_s, float(np.linalg.norm(v - v_ref)))
+    print(
+        f"\ndeep space cases: {len(records)}; max position difference {max_pos_km * 1e3:.6g} m; "
+        f"max velocity difference {max_vel_km_s * 1e3:.6g} m/s"
+    )
+    assert not failures, failures[:5]
+    assert max_pos_km <= POS_TOL_KM, f"position {max_pos_km} km exceeds {POS_TOL_KM} km"
+    assert max_vel_km_s <= VEL_TOL_KM_S, f"velocity {max_vel_km_s} km/s exceeds {VEL_TOL_KM_S}"
 
 
 def test_bad_line_length_is_rejected():
