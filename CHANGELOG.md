@@ -86,6 +86,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Astrometric directions from an SPK kernel (`ephemeris::astrometric`, and
   `tptplan ephemeris query --astrometric`), with a converged light time. Checked
   against JPL Horizons at five epochs (0.015 arcsec maximum).
+- Climate-index pipelines on lazy fields (`ops::climate`): monthly anomaly,
+  area-weighted box means, the Niño-3.4 index and its relative form.
+- Read-only HDF5 subset, and blosclz far back-references (distances above 8191).
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
   coefficients; matches `erfa.nut00b` to 1e-13 rad.
 - Atmospheric refraction for Alt/Az: the ERFA `refco` constants
