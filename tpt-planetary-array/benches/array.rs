@@ -103,3 +103,14 @@ fn codec_lz4_round_trip_1mib(bencher: divan::Bencher) {
         codec.decode(black_box(&enc)).expect("decode")
     });
 }
+
+/// zstd (level 1, the only level the pure-Rust encoder uses) encode and decode of 1 MiB.
+#[divan::bench]
+fn codec_zstd_round_trip_1mib(bencher: divan::Bencher) {
+    let data = payload_1mib();
+    let codec = tpt_planetary_array::codec::compress::ZstdCodec::new(1);
+    bencher.bench_local(|| {
+        let enc = codec.encode(black_box(&data)).expect("encode");
+        codec.decode(black_box(&enc)).expect("decode")
+    });
+}
