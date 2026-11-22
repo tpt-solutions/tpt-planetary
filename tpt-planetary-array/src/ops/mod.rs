@@ -23,6 +23,8 @@ pub(crate) mod simd;
 mod source;
 
 pub mod broadcast;
+#[cfg(feature = "std")]
+pub mod climate;
 pub mod climatology;
 pub mod elementwise;
 pub mod groupby;
