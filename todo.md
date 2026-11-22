@@ -193,7 +193,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] NetCDF3 writer
 - [ ] CF-conventions metadata handling (time units, calendars, coordinates) — PARTIAL: time units days, hours, minutes and seconds; all CF calendars except `none` (standard/gregorian, proleptic_gregorian, noleap/365_day, all_leap/366_day, 360_day, julian); units of months or years and coordinate/bounds handling are not done
 - [x] NetCDF-style API surface (dimensions, variables, attributes)
-- [x] Interop tests using files produced by netCDF4/xarray — PARTIAL but in place: `tests/netcdf3_interop.rs` reads NetCDF-3 classic and 64-bit files written by netCDF4 (`fixtures/gen_netcdf3_fixtures.py`), and a file written by this crate's writer is read back by Rust and checked by netCDF4 and xarray (`fixtures/check_netcdf_writer.py`). No NetCDF-4 (HDF5) files.
+- [x] Interop tests using files produced by netCDF4/xarray — PARTIAL but in place: `tests/netcdf3_interop.rs` reads NetCDF-3 classic and 64-bit files written by netCDF4 (`fixtures/gen_netcdf3_fixtures.py`), and a file written by this crate's writer is read back by Rust and checked by netCDF4 and xarray (`fixtures/check_netcdf_writer.py`). No NetCDF-4 (HDF5) files; those are read by `hdf5` (see the Phase 5 item).
 
 ### WCS (tpt-planetary-astro)
 - [x] FITS header WCS keyword parser (CRPIX, CRVAL, CDELT, CD/PC matrix, CTYPE)
@@ -258,7 +258,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 
 ## Phase 5: Post-Release (v0.2+)
 
-- [ ] Read-only HDF5 / NetCDF4 subset reader (superblock, B-trees, contiguous/chunked, deflate), pure Rust
+- [x] Read-only HDF5 / NetCDF4 subset reader (superblock, B-trees, contiguous/chunked, deflate), pure Rust — DONE for the default file format: `tpt-planetary-array/src/hdf5` reads superblocks v0 to v3, object headers v1 and v2, old-style and link-message groups, dataspaces v1 and v2, contiguous, compact and chunked (version 3 layout, B-tree index) data with deflate, shuffle and fletcher32, fill values, and attributes. Checked against h5py 3.16 (HDF5 2.0) fixtures (`tests/hdf5_fixtures.rs`, `tools/gen_hdf5_fixtures.py`). Not read, and reported as unsupported: dense (fractal-heap) groups and attributes, version 4 layouts and their chunk indexes (what `libver='latest'` writes for chunked data), variable-length strings, compound and other classes, and soft or external links. netCDF-4 files that use only these features read as HDF5 datasets; their dimension scales are attributes and are not interpreted
 - [ ] Write HDF5 (evaluate demand)
 - [ ] GCS and Azure Blob stores — DEFERRED (ADR-004): both need TLS, which the crate does not include.
 - [ ] Zarr v3 extensions (more codecs, data types) and Zarr spec updates
