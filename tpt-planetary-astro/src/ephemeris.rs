@@ -242,7 +242,7 @@ fn read_bytes<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
     slice.try_into().ok()
 }
 
-fn read_u32(bytes: &[u8], offset: usize, endian: Endian) -> Option<u32> {
+pub(crate) fn read_u32(bytes: &[u8], offset: usize, endian: Endian) -> Option<u32> {
     let a = read_bytes::<4>(bytes, offset)?;
     Some(match endian {
         Endian::Little => u32::from_le_bytes(a),
@@ -250,7 +250,7 @@ fn read_u32(bytes: &[u8], offset: usize, endian: Endian) -> Option<u32> {
     })
 }
 
-fn read_i32(bytes: &[u8], offset: usize, endian: Endian) -> Option<i32> {
+pub(crate) fn read_i32(bytes: &[u8], offset: usize, endian: Endian) -> Option<i32> {
     let a = read_bytes::<4>(bytes, offset)?;
     Some(match endian {
         Endian::Little => i32::from_le_bytes(a),
@@ -258,7 +258,7 @@ fn read_i32(bytes: &[u8], offset: usize, endian: Endian) -> Option<i32> {
     })
 }
 
-fn read_f64(bytes: &[u8], offset: usize, endian: Endian) -> Option<f64> {
+pub(crate) fn read_f64(bytes: &[u8], offset: usize, endian: Endian) -> Option<f64> {
     let a = read_bytes::<8>(bytes, offset)?;
     Some(match endian {
         Endian::Little => f64::from_le_bytes(a),
