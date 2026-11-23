@@ -15,10 +15,9 @@
 //!   Fortran `D` exponents in numbers.
 //!
 //! Tile-compressed integer images with `RICE_1` are decompressed by
-//! [`Hdu::compressed_values`]. Not supported, and rejected with an error: writing
-//! variable-length, bit and complex binary columns, other tile compression
-//! (`GZIP`, `HCOMPRESS`, `PLIO`) and quantized float tiles, random groups, and
-//! `CONTINUE` long-string cards. A `HIERARCH` card is returned as a commentary card
+//! [`Hdu::compressed_values`]. Not supported, and rejected with an error: dithered
+//! quantized float tiles, other tile compression (`HCOMPRESS`, `PLIO`), writing
+//! tile-compressed images, random groups, and `CONTINUE` long-string cards. A `HIERARCH` card is returned as a commentary card
 //! and is not interpreted.
 //! A final data block that lacks its zero padding is accepted.
 //!
@@ -2276,6 +2275,95 @@ pub enum ColumnData<'a> {
     Double(&'a [f64]),
     /// `A`: one string per row, each padded with spaces to the width (bytes).
     Text(&'a [&'a str], usize),
+    /// `X`: bits, `repeat` per row, packed most significant bit first into
+    /// `ceil(repeat / 8)` bytes.
+    Bit(&'a [bool]),
+    /// `C`: single-precision complex values `[re, im]`, `repeat` per row.
+    ComplexFloat(&'a [[f32; 2]]),
+    /// `M`: double-precision complex values `[re, im]`, `repeat` per row.
+    ComplexDouble(&'a [[f64; 2]]),
+    /// `P` (or `Q` when the flag is true): one variable-length array per row, held
+    /// in the heap after the table rows.
+    Variable(VarElements<'a>, bool),
+}
+
+/// The elements of a variable-length column: one array per row, all of one type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(feature = "std")]
+pub enum VarElements<'a> {
+    /// `PB`: unsigned bytes.
+    Byte(&'a [&'a [u8]]),
+    /// `PI`: 16-bit signed integers.
+    Short(&'a [&'a [i16]]),
+    /// `PJ`: 32-bit signed integers.
+    Int(&'a [&'a [i32]]),
+    /// `PK`: 64-bit signed integers.
+    Long(&'a [&'a [i64]]),
+    /// `PE`: 32-bit floats.
+    Float(&'a [&'a [f32]]),
+    /// `PD`: 64-bit floats.
+    Double(&'a [&'a [f64]]),
+}
+
+#[cfg(feature = "std")]
+impl VarElements<'_> {
+    /// The `TFORM` element letter.
+    fn code(&self) -> char {
+        match self {
+            VarElements::Byte(_) => 'B',
+            VarElements::Short(_) => 'I',
+            VarElements::Int(_) => 'J',
+            VarElements::Long(_) => 'K',
+            VarElements::Float(_) => 'E',
+            VarElements::Double(_) => 'D',
+        }
+    }
+
+    /// Number of rows (one array each).
+    fn rows(&self) -> usize {
+        match self {
+            VarElements::Byte(v) => v.len(),
+            VarElements::Short(v) => v.len(),
+            VarElements::Int(v) => v.len(),
+            VarElements::Long(v) => v.len(),
+            VarElements::Float(v) => v.len(),
+            VarElements::Double(v) => v.len(),
+        }
+    }
+
+    /// Number of elements in the array of `row`.
+    fn len_of(&self, row: usize) -> usize {
+        match self {
+            VarElements::Byte(v) => v[row].len(),
+            VarElements::Short(v) => v[row].len(),
+            VarElements::Int(v) => v[row].len(),
+            VarElements::Long(v) => v[row].len(),
+            VarElements::Float(v) => v[row].len(),
+            VarElements::Double(v) => v[row].len(),
+        }
+    }
+
+    /// Appends the big-endian elements of the array of `row` to the heap.
+    fn push_row(&self, heap: &mut Vec<u8>, row: usize) {
+        match self {
+            VarElements::Byte(v) => heap.extend_from_slice(v[row]),
+            VarElements::Short(v) => v[row]
+                .iter()
+                .for_each(|x| heap.extend_from_slice(&x.to_be_bytes())),
+            VarElements::Int(v) => v[row]
+                .iter()
+                .for_each(|x| heap.extend_from_slice(&x.to_be_bytes())),
+            VarElements::Long(v) => v[row]
+                .iter()
+                .for_each(|x| heap.extend_from_slice(&x.to_be_bytes())),
+            VarElements::Float(v) => v[row]
+                .iter()
+                .for_each(|x| heap.extend_from_slice(&x.to_be_bytes())),
+            VarElements::Double(v) => v[row]
+                .iter()
+                .for_each(|x| heap.extend_from_slice(&x.to_be_bytes())),
+        }
+    }
 }
 
 /// One column of a binary table to write.
@@ -2310,6 +2398,12 @@ impl ColumnData<'_> {
             ColumnData::Float(_) => ('E', 4),
             ColumnData::Double(_) => ('D', 8),
             ColumnData::Text(_, _) => ('A', 1),
+            ColumnData::Bit(_) => ('X', 1),
+            ColumnData::ComplexFloat(_) => ('C', 8),
+            ColumnData::ComplexDouble(_) => ('M', 16),
+            ColumnData::Variable(_, wide) => {
+                (if *wide { 'Q' } else { 'P' }, if *wide { 16 } else { 8 })
+            }
         }
     }
 
@@ -2324,6 +2418,10 @@ impl ColumnData<'_> {
             ColumnData::Float(v) => v.len(),
             ColumnData::Double(v) => v.len(),
             ColumnData::Text(v, _) => v.len(),
+            ColumnData::Bit(v) => v.len(),
+            ColumnData::ComplexFloat(v) => v.len(),
+            ColumnData::ComplexDouble(v) => v.len(),
+            ColumnData::Variable(v, _) => v.rows(),
         }
     }
 }
@@ -2339,6 +2437,33 @@ fn push_row_values(data: &mut Vec<u8>, col: &TableColumn<'_>, row: usize) {
             }
         }
         ColumnData::Byte(v) => data.extend_from_slice(&v[row * r..row * r + r]),
+        ColumnData::Bit(v) => {
+            let bits = &v[row * r..row * r + r];
+            for byte in 0..r.div_ceil(8) {
+                let mut b = 0u8;
+                for bit in 0..8 {
+                    let k = byte * 8 + bit;
+                    if k < r && bits[k] {
+                        b |= 0x80 >> bit;
+                    }
+                }
+                data.push(b);
+            }
+        }
+        ColumnData::ComplexFloat(v) => {
+            for z in &v[row * r..row * r + r] {
+                data.extend_from_slice(&z[0].to_be_bytes());
+                data.extend_from_slice(&z[1].to_be_bytes());
+            }
+        }
+        ColumnData::ComplexDouble(v) => {
+            for z in &v[row * r..row * r + r] {
+                data.extend_from_slice(&z[0].to_be_bytes());
+                data.extend_from_slice(&z[1].to_be_bytes());
+            }
+        }
+        // A variable-length row is a descriptor here and its elements in the heap.
+        ColumnData::Variable(..) => {}
         ColumnData::Short(v) => {
             for x in &v[row * r..row * r + r] {
                 data.extend_from_slice(&x.to_be_bytes());
@@ -2400,6 +2525,13 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
                 }
                 (w, values.len())
             }
+            ColumnData::Bit(v) => {
+                if c.repeat == 0 || v.len() % c.repeat != 0 {
+                    return Err(FitsError::ShapeMismatch);
+                }
+                (c.repeat.div_ceil(8), v.len() / c.repeat)
+            }
+            ColumnData::Variable(elements, wide) => (if wide { 16 } else { 8 }, elements.rows()),
             _ => {
                 if c.repeat == 0 || c.data.value_count() % c.repeat != 0 {
                     return Err(FitsError::ShapeMismatch);
@@ -2417,9 +2549,25 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
     let rows = rows.unwrap_or(0);
 
     let mut data = Vec::with_capacity(width * rows);
+    let mut heap: Vec<u8> = Vec::new();
     for row in 0..rows {
         for c in columns {
-            push_row_values(&mut data, c, row);
+            match c.data {
+                ColumnData::Variable(elements, wide) => {
+                    // The descriptor: element count, then the heap offset in bytes.
+                    let count = elements.len_of(row);
+                    let offset = heap.len();
+                    if wide {
+                        data.extend_from_slice(&(count as i64).to_be_bytes());
+                        data.extend_from_slice(&(offset as i64).to_be_bytes());
+                    } else {
+                        data.extend_from_slice(&(count as i32).to_be_bytes());
+                        data.extend_from_slice(&(offset as i32).to_be_bytes());
+                    }
+                    elements.push_row(&mut heap, row);
+                }
+                _ => push_row_values(&mut data, c, row),
+            }
         }
     }
 
@@ -2501,7 +2649,7 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
         &mut ext,
         &WriteCard {
             keyword: "PCOUNT",
-            value: Some(Value::Integer(0)),
+            value: Some(Value::Integer(heap.len() as i64)),
             comment: "",
         },
     )?;
@@ -2526,6 +2674,9 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
         let (code, _) = c.data.code_and_size();
         let form = match c.data {
             ColumnData::Text(_, w) => format!("{w}A"),
+            ColumnData::Variable(elements, wide) => {
+                format!("1{}{}", if wide { 'Q' } else { 'P' }, elements.code())
+            }
             _ => format!("{}{code}", c.repeat),
         };
         let ttype = format!("TTYPE{n}");
@@ -2546,7 +2697,15 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
                 comment: "",
             },
         )?;
-        let numeric = !matches!(c.data, ColumnData::Text(..) | ColumnData::Logical(_));
+        let numeric = matches!(
+            c.data,
+            ColumnData::Byte(_)
+                | ColumnData::Short(_)
+                | ColumnData::Int(_)
+                | ColumnData::Long(_)
+                | ColumnData::Float(_)
+                | ColumnData::Double(_)
+        );
         if numeric && c.tscal != 1.0 {
             let k = format!("TSCAL{n}");
             push_card(
@@ -2590,6 +2749,7 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
     ext.extend_from_slice(&end);
     ext.resize(ext.len().div_ceil(BLOCK) * BLOCK, b' ');
 
+    data.extend_from_slice(&heap);
     let padded = data.len().div_ceil(BLOCK) * BLOCK;
     let mut out = primary_bytes;
     out.extend_from_slice(&ext);
