@@ -558,3 +558,60 @@ mod dither_tests {
         assert!(seq.iter().all(|&v| v > 0.0 && v < 1.0));
     }
 }
+
+/// Quantizes a float tile without dithering: `q = round((x - zero) / delta)`.
+/// Non-finite values are stored as `blank`.
+#[cfg(feature = "std")]
+pub fn quantize_plain(x: &[f64], delta: f64, zero: f64, blank: i32, out: &mut [i32]) {
+    for (q, &v) in out.iter_mut().zip(x) {
+        *q = if !v.is_finite() {
+            blank
+        } else if delta == 0.0 {
+            // A zero step stores the zero point for every value.
+            0
+        } else {
+            ((v - zero) / delta).round() as i32
+        };
+    }
+}
+
+/// Quantizes a float tile with CFITSIO's subtractive dither, the inverse of
+/// [`unquantize_dithered`]: `q = round((x - zero) / delta + r - 0.5)`, with `r`
+/// the next value of the sequence (advanced for every pixel, as on reading).
+/// Non-finite values are `blank`; with `zero_preserving`, exact zeros are
+/// stored as the zero code.
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+pub fn quantize_dithered(
+    x: &[f64],
+    row: usize,
+    delta: f64,
+    zero: f64,
+    blank: i32,
+    zero_preserving: bool,
+    seq: &[f32],
+    out: &mut [i32],
+) {
+    let mut iseed = (row - 1) % N_RANDOM;
+    let mut nextrand = (f64::from(seq[iseed]) * 500.0) as usize;
+    for (q, &v) in out.iter_mut().zip(x) {
+        let r = f64::from(seq[nextrand]);
+        *q = if !v.is_finite() {
+            blank
+        } else if zero_preserving && v == 0.0 {
+            ZERO_CODE
+        } else if delta == 0.0 {
+            0
+        } else {
+            (((v - zero) / delta) + r - 0.5).round() as i32
+        };
+        nextrand += 1;
+        if nextrand == N_RANDOM {
+            iseed += 1;
+            if iseed == N_RANDOM {
+                iseed = 0;
+            }
+            nextrand = (f64::from(seq[iseed]) * 500.0) as usize;
+        }
+    }
+}

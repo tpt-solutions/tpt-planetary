@@ -17,10 +17,11 @@
 //! Tile-compressed images (`RICE_1`, `GZIP_1`, `GZIP_2`) are decompressed by
 //! [`Hdu::compressed_values`], including quantized float tiles with no dithering
 //! or with `SUBTRACTIVE_DITHER_1` and `_2`. Integer images can be written
-//! tile-compressed with [`write_compressed_image`]. Not supported, and rejected
-//! with an error: other tile compression (`HCOMPRESS`, `PLIO`), writing float or
-//! quantized images, random groups, and `CONTINUE` long-string cards. A `HIERARCH`
-//! card is returned as a commentary card and is not interpreted.
+//! tile-compressed with [`write_compressed_image`], and float images quantized
+//! per tile with [`write_compressed_float_image`]. Not supported, and rejected
+//! with an error: other tile compression (`HCOMPRESS`, `PLIO`), random groups,
+//! and `CONTINUE` long-string cards. A `HIERARCH` card is returned as a
+//! commentary card and is not interpreted.
 //! A final data block that lacks its zero padding is accepted.
 //!
 //! Pixel order follows FITS: axis 1 varies fastest, so the flat index of a
@@ -2962,6 +2963,217 @@ pub fn write_compressed_image(
         tnull: None,
     };
     write_bintable(&[column], &cards)
+}
+
+/// How a float image is quantized before tile compression (CFITSIO's `ZQUANTIZ`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "std")]
+pub enum Quantization {
+    /// `NO_DITHER`: `q = round((x - zero) / delta)`.
+    NoDither,
+    /// `SUBTRACTIVE_DITHER_1`: a pseudo-random offset per pixel, from the dither sequence.
+    SubtractiveDither1,
+    /// `SUBTRACTIVE_DITHER_2`: as dither 1, but exact zeros stay exact.
+    SubtractiveDither2,
+}
+
+/// Writes a float image as a tile-compressed extension (`ZBITPIX = -32`): each
+/// tile is quantized to 32-bit integers with its own `ZSCALE` (delta) and `ZZERO`
+/// (zero point), the integers are compressed with `method`, and the quantization
+/// keywords (`ZQUANTIZ`, `ZDITHER0`, `ZBLANK`) are written.
+///
+/// Each tile's range is divided into `level` steps: `delta = (max - min) / level`,
+/// `zero = min`. The reader's values are then within `delta / 2` of the input for
+/// `NoDither` (and within `delta` with dither). Non-finite values are undefined
+/// (`ZBLANK`) and read back as NaN; with `SubtractiveDither2`, exact zeros read
+/// back as zero. A tile with a single value is stored exactly.
+///
+/// `dither_seed` is `ZDITHER0`, at least 1, and is used only with a dither.
+///
+/// # Errors
+///
+/// [`FitsError::ShapeMismatch`] if the pixel count does not match `dims`, or the
+/// tile and axis counts differ; [`FitsError::Unsupported`] for a zero-length axis
+/// or tile, a non-positive `level`, or a `dither_seed` below 1.
+#[cfg(feature = "std")]
+pub fn write_compressed_float_image(
+    data: &[f32],
+    dims: &[usize],
+    tiles: &[usize],
+    method: TileMethod,
+    quantization: Quantization,
+    level: f64,
+    dither_seed: i64,
+) -> Result<Vec<u8>> {
+    let total: usize = dims.iter().product();
+    if dims.is_empty() || total != data.len() || dims.len() != tiles.len() {
+        return Err(FitsError::ShapeMismatch);
+    }
+    if dims.contains(&0) || tiles.contains(&0) {
+        return Err(FitsError::Unsupported("a zero-length axis or tile"));
+    }
+    if !(level > 0.0 && level.is_finite()) {
+        return Err(FitsError::Unsupported(
+            "the quantization level must be positive",
+        ));
+    }
+    if quantization != Quantization::NoDither && dither_seed < 1 {
+        return Err(FitsError::Unsupported("ZDITHER0 must be at least 1"));
+    }
+    const BLANK: i32 = -2_147_483_648;
+    let bytepix = 4usize;
+    let blocksize = 32usize;
+    let seq = if quantization == Quantization::NoDither {
+        Vec::new()
+    } else {
+        tile::dither_sequence()
+    };
+
+    let counts: Vec<usize> = dims
+        .iter()
+        .zip(tiles)
+        .map(|(&d, &t)| d.div_ceil(t))
+        .collect();
+    let mut stride = Vec::with_capacity(dims.len());
+    let mut acc = 1usize;
+    for &d in dims {
+        stride.push(acc);
+        acc *= d;
+    }
+    let tile_total: usize = counts.iter().product();
+    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(tile_total);
+    let mut scales = Vec::with_capacity(tile_total);
+    let mut zeros = Vec::with_capacity(tile_total);
+    for t in 0..tile_total {
+        let mut rest = t;
+        let mut origin = Vec::with_capacity(dims.len());
+        let mut extent = Vec::with_capacity(dims.len());
+        for k in 0..dims.len() {
+            let g = rest % counts[k];
+            rest /= counts[k];
+            let start = g * tiles[k];
+            origin.push(start);
+            extent.push(tiles[k].min(dims[k] - start));
+        }
+        let npix: usize = extent.iter().product();
+        let mut values = Vec::with_capacity(npix);
+        for p in 0..npix {
+            let mut q = p;
+            let mut flat = 0usize;
+            for k in 0..dims.len() {
+                let c = q % extent[k];
+                q /= extent[k];
+                flat += (origin[k] + c) * stride[k];
+            }
+            values.push(f64::from(data[flat]));
+        }
+
+        // The tile's range over its finite values.
+        let finite = values.iter().copied().filter(|v| v.is_finite());
+        let (lo, hi) = finite.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+        let (zero, delta) = if lo > hi {
+            (0.0, 1.0) // no finite value: everything is undefined
+        } else if hi > lo {
+            (lo, (hi - lo) / level)
+        } else {
+            (lo, 0.0) // a single value: a zero step reads back as the zero point
+        };
+        let mut q = vec![0i32; npix];
+        match quantization {
+            Quantization::NoDither => tile::quantize_plain(&values, delta, zero, BLANK, &mut q),
+            Quantization::SubtractiveDither1 | Quantization::SubtractiveDither2 => {
+                tile::quantize_dithered(
+                    &values,
+                    t + dither_seed as usize,
+                    delta,
+                    zero,
+                    BLANK,
+                    quantization == Quantization::SubtractiveDither2,
+                    &seq,
+                    &mut q,
+                );
+            }
+        }
+        let bits: Vec<u32> = q.iter().map(|&v| v as u32).collect();
+        encoded.push(match method {
+            TileMethod::Rice1 => tile::rice_encode(&bits, bytepix, blocksize)?,
+            TileMethod::Gzip1 => tile::gzip_tile_encode(&bits, bytepix, false),
+            TileMethod::Gzip2 => tile::gzip_tile_encode(&bits, bytepix, true),
+        });
+        scales.push(delta);
+        zeros.push(zero);
+    }
+
+    let method_name = match method {
+        TileMethod::Rice1 => "RICE_1",
+        TileMethod::Gzip1 => "GZIP_1",
+        TileMethod::Gzip2 => "GZIP_2",
+    };
+    let quant_name = match quantization {
+        Quantization::NoDither => "NO_DITHER",
+        Quantization::SubtractiveDither1 => "SUBTRACTIVE_DITHER_1",
+        Quantization::SubtractiveDither2 => "SUBTRACTIVE_DITHER_2",
+    };
+    let mut entries: Vec<(String, Value<'static>)> = vec![
+        ("ZIMAGE".into(), Value::Logical(true)),
+        ("ZCMPTYPE".into(), Value::Text(method_name)),
+        ("ZBITPIX".into(), Value::Integer(-32)),
+        ("ZNAXIS".into(), Value::Integer(dims.len() as i64)),
+    ];
+    for (k, (&d, &t)) in dims.iter().zip(tiles).enumerate() {
+        entries.push((format!("ZNAXIS{}", k + 1), Value::Integer(d as i64)));
+        entries.push((format!("ZTILE{}", k + 1), Value::Integer(t as i64)));
+    }
+    if method == TileMethod::Rice1 {
+        entries.push(("ZNAME1".into(), Value::Text("BLOCKSIZE")));
+        entries.push(("ZVAL1".into(), Value::Integer(blocksize as i64)));
+        entries.push(("ZNAME2".into(), Value::Text("BYTEPIX")));
+        entries.push(("ZVAL2".into(), Value::Integer(bytepix as i64)));
+    }
+    entries.push(("ZQUANTIZ".into(), Value::Text(quant_name)));
+    if quantization != Quantization::NoDither {
+        entries.push(("ZDITHER0".into(), Value::Integer(dither_seed)));
+    }
+    entries.push(("ZBLANK".into(), Value::Integer(i64::from(BLANK))));
+    let cards: Vec<WriteCard<'_>> = entries
+        .iter()
+        .map(|(keyword, value)| WriteCard {
+            keyword: keyword.as_str(),
+            value: Some(*value),
+            comment: "",
+        })
+        .collect();
+
+    let rows: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+    let columns = [
+        TableColumn {
+            name: "COMPRESSED_DATA",
+            data: ColumnData::Variable(VarElements::Byte(&rows), false),
+            repeat: 1,
+            tscal: 1.0,
+            tzero: 0.0,
+            tnull: None,
+        },
+        TableColumn {
+            name: "ZSCALE",
+            data: ColumnData::Double(&scales),
+            repeat: 1,
+            tscal: 1.0,
+            tzero: 0.0,
+            tnull: None,
+        },
+        TableColumn {
+            name: "ZZERO",
+            data: ColumnData::Double(&zeros),
+            repeat: 1,
+            tscal: 1.0,
+            tzero: 0.0,
+            tnull: None,
+        },
+    ];
+    write_bintable(&columns, &cards)
 }
 
 /// Values of one column of an ASCII table, as stored, as text fields of a fixed
