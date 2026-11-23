@@ -182,7 +182,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] Vectorised comparisons, masks, `where`/select
 - [ ] SIMD reductions (sum, mean, min, max, std) with scalar fallbacks — PARTIAL: full-array sum, mean, min and max are vectorised under the simd feature; per-axis reductions are scalar
 - [x] Broadcasting rules (N-D)
-- [ ] Axis-wise reductions and group-by style aggregations (e.g. monthly climatology) — PARTIAL: axis reductions, fixed-period climatology/anomaly (`Expr::climatology`, `Expr::anomaly`), and group means on integer labels (`Expr::group_mean`, NaN-aware) are done. Calendar-month labels from CF time coordinates exist (`netcdf3::calendar_month_labels`, all CF calendars except months/years units); per-axis SIMD reductions are not done
+- [ ] Axis-wise reductions and group-by style aggregations (e.g. monthly climatology) — PARTIAL: axis reductions, fixed-period climatology/anomaly (`Expr::climatology`, `Expr::anomaly`), and group means on integer labels (`Expr::group_mean`, NaN-aware) are done. Calendar-month labels from CF time coordinates exist (`netcdf3::calendar_month_labels`, all CF calendars except months/years units); per-axis reductions walk the last axis as a run, with the same accumulation order (about 20% faster on leading-axis reductions, bit-identical), but per-axis SIMD reductions are not done
 - [x] Rolling/window ops and resampling along time
 - [x] Operation fusion in lazy graph (e.g. `array * 2 + 1` in one pass)
 - [x] Spherical-aware weighting (cos(lat) area weights) for global means

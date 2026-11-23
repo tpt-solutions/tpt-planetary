@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::grid::c_strides;
 use crate::lazy::{EvalOptions, Expr};
-use crate::ops::nd::{element_count, for_each_index};
+use crate::ops::nd::element_count;
 
 /// A reduction applied along one or more axes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,20 +174,48 @@ impl Expr {
                     }
                     return;
                 }
-                let mut i = 0usize;
-                for_each_index(&region.count, |idx| {
-                    let ok = block.valid[i];
-                    let v = block.values[i];
-                    i += 1;
-                    if skip_invalid && !ok {
-                        return;
+                // The block is row-major over `region.count`. The last axis is
+                // walked as a run, so the output offset of each element is a
+                // base plus its position in the run. The order of accumulation
+                // per output cell is the same as element by element.
+                let nd = region.count.len();
+                if nd == 0 {
+                    for (i, &v) in block.values.iter().enumerate() {
+                        if !skip_invalid || block.valid[i] {
+                            acc[0].push(v);
+                        }
                     }
-                    let mut off = 0u64;
-                    for (d, &j) in idx.iter().enumerate() {
-                        off += (region.start[d] + j) * in_strides[d];
+                    return;
+                }
+                let last = nd - 1;
+                let run = region.count[last] as usize;
+                let run_stride = in_strides[last];
+                let run_start = region.start[last];
+                let mut outer = vec![0u64; last];
+                let outer_total: usize = region.count[..last].iter().map(|&c| c as usize).product();
+                for o in 0..outer_total {
+                    let mut base = 0u64;
+                    for d in 0..last {
+                        base += (region.start[d] + outer[d]) * in_strides[d];
                     }
-                    acc[off as usize].push(v);
-                });
+                    let row = o * run;
+                    for k in 0..run {
+                        let i = row + k;
+                        if skip_invalid && !block.valid[i] {
+                            continue;
+                        }
+                        let off = base + (run_start + k as u64) * run_stride;
+                        acc[off as usize].push(block.values[i]);
+                    }
+                    // Advance the odometer over the outer axes.
+                    for d in (0..last).rev() {
+                        outer[d] += 1;
+                        if outer[d] < region.count[d] {
+                            break;
+                        }
+                        outer[d] = 0;
+                    }
+                }
             },
         )?;
         Ok(Reduced {
