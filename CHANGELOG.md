@@ -95,6 +95,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   forms, with TSCAL, TZERO and TNULL; checked by a round trip and by astropy.
 - FITS ASCII table writer (`fits::write_ascii_table`) for A, I, Fw.d and Ew.d fields,
   with TSCAL, TZERO and TNULL; checked by a round trip and by astropy.
+- FITS bit, complex and variable-length binary columns: `read_bits`, `read_complex`
+  and `read_vla` (with the heap and THEAP), checked against astropy.
 - FITS ASCII tables: `Hdu::ascii_table` reads `XTENSION = 'TABLE'` columns of A, I,
   F, E and D fields with scaling and TNULL, checked against astropy.
 - Apparent directions from an SPK kernel (`ephemeris::apparent_direction`, and
