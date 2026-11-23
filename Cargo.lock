@@ -567,6 +567,7 @@ name = "tpt-planetary-astro"
 version = "0.1.0"
 dependencies = [
  "divan",
+ "miniz_oxide",
  "tpt-planetary-core",
 ]
 

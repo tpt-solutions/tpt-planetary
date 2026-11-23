@@ -15,6 +15,8 @@
 //! as `0, 1, 2, 3, ...`). The parameters per byte width are CFITSIO's: 3, 4 or
 //! 5 `fs` bits, and `fsmax` 6, 14 or 25.
 
+use alloc::vec::Vec;
+
 use crate::fits::{FitsError, Result};
 
 /// Bit reader, most significant bit first.
@@ -130,6 +132,85 @@ pub fn rice_decode(data: &[u8], bytepix: usize, nblock: usize, out: &mut [u32]) 
             }
         }
         i = end;
+    }
+    Ok(())
+}
+
+/// The payload of a gzip member (RFC 1952): the deflate stream after the header.
+fn gzip_payload(data: &[u8]) -> Result<&[u8]> {
+    let truncated = FitsError::Truncated("gzip header is cut short");
+    if data.len() < 10 {
+        return Err(truncated);
+    }
+    let flags = data[3];
+    let mut pos = 10;
+    if flags & 0x04 != 0 {
+        // FEXTRA: a 16-bit length, then that many bytes.
+        let len = usize::from(*data.get(pos).ok_or(truncated)?)
+            | usize::from(*data.get(pos + 1).ok_or(truncated)?) << 8;
+        pos += 2 + len;
+    }
+    for flag in [0x08, 0x10] {
+        // FNAME and FCOMMENT: zero-terminated strings.
+        if flags & flag != 0 {
+            let end = data
+                .get(pos..)
+                .and_then(|rest| rest.iter().position(|&b| b == 0))
+                .ok_or(truncated)?;
+            pos += end + 1;
+        }
+    }
+    if flags & 0x02 != 0 {
+        // FHCRC: two bytes of header checksum.
+        pos += 2;
+    }
+    data.get(pos..).ok_or(truncated)
+}
+
+/// Inflates one compressed tile. The framing is detected from the first bytes:
+/// gzip (`1f 8b`), zlib (a `0x78` header), or a raw deflate stream.
+///
+/// # Errors
+///
+/// [`FitsError::InvalidData`] if the deflate stream is malformed.
+pub fn inflate_tile(data: &[u8]) -> Result<Vec<u8>> {
+    let bad = |_| FitsError::InvalidData("tile deflate stream is malformed");
+    if data.starts_with(&[0x1f, 0x8b]) {
+        miniz_oxide::inflate::decompress_to_vec(gzip_payload(data)?).map_err(bad)
+    } else if data.first() == Some(&0x78) {
+        miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(bad)
+    } else {
+        miniz_oxide::inflate::decompress_to_vec(data).map_err(bad)
+    }
+}
+
+/// Decodes one GZIP_1 or GZIP_2 tile of `out.len()` pixels of `bytepix` bytes.
+///
+/// GZIP_1 inflates to the big-endian pixel bytes. GZIP_2 inflates to byte
+/// planes: all the most significant bytes first, then the next plane, and so
+/// on, each of `out.len()` bytes.
+///
+/// # Errors
+///
+/// [`FitsError::InvalidData`] for a malformed stream, [`FitsError::Truncated`]
+/// if it holds fewer bytes than the tile needs.
+pub fn gzip_decode(data: &[u8], bytepix: usize, shuffled: bool, out: &mut [u32]) -> Result<()> {
+    let bytes = inflate_tile(data)?;
+    let n = out.len();
+    if bytes.len() < n * bytepix {
+        return Err(FitsError::Truncated("gzip tile holds too few bytes"));
+    }
+    for (i, slot) in out.iter_mut().enumerate() {
+        let mut value = 0u32;
+        for p in 0..bytepix {
+            let byte = if shuffled {
+                bytes[p * n + i]
+            } else {
+                bytes[i * bytepix + p]
+            };
+            value = (value << 8) | u32::from(byte);
+        }
+        *slot = value;
     }
     Ok(())
 }

@@ -14,6 +14,8 @@ categories = ["science", "astronomy"]
 
 [dependencies]
 tpt-planetary-core = { workspace = true, features = ["alloc"] }
+# Pure-Rust DEFLATE for gzip-compressed FITS tiles (same crate and spec as tpt-planetary-array).
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 
 [lints]
 workspace = true

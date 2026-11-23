@@ -665,8 +665,9 @@ impl<'a> Hdu<'a> {
         self.table && self.header.get("ZIMAGE") == Some(Value::Logical(true))
     }
 
-    /// Decompresses a tile-compressed image (`ZCMPTYPE = 'RICE_1'`) into its
-    /// physical values in FITS order, with `BZERO` and `BSCALE` applied.
+    /// Decompresses a tile-compressed integer image (`ZCMPTYPE` `RICE_1`,
+    /// `GZIP_1` or `GZIP_2`) into its physical values in FITS order, with `BZERO`
+    /// and `BSCALE` applied.
     ///
     /// The tiles come from the `COMPRESSED_DATA` column, one row per tile, in
     /// the standard order (`ZTILE1` fastest). Partial tiles at the edges are
@@ -687,8 +688,11 @@ impl<'a> Hdu<'a> {
         }
         let header = self.header;
         let text = |key: &str| header.get(key).and_then(|v| text_value(v)).map(str::trim);
-        if text("ZCMPTYPE") != Some("RICE_1") {
-            return Err(FitsError::Unsupported("tile compression other than RICE_1"));
+        let method = text("ZCMPTYPE").ok_or(FitsError::InvalidHeader("ZCMPTYPE missing"))?;
+        if !matches!(method, "RICE_1" | "GZIP_1" | "GZIP_2") {
+            return Err(FitsError::Unsupported(
+                "tile compression other than RICE_1, GZIP_1 and GZIP_2",
+            ));
         }
         let zbitpix = header
             .get("ZBITPIX")
@@ -787,7 +791,11 @@ impl<'a> Hdu<'a> {
             stream.clear();
             stream.extend(row.iter().map(|&v| v as u8));
             let mut values = vec![0u32; npix];
-            tile::rice_decode(&stream, bytepix, blocksize, &mut values)?;
+            match method {
+                "RICE_1" => tile::rice_decode(&stream, bytepix, blocksize, &mut values)?,
+                "GZIP_1" => tile::gzip_decode(&stream, (zbitpix / 8) as usize, false, &mut values)?,
+                _ => tile::gzip_decode(&stream, (zbitpix / 8) as usize, true, &mut values)?,
+            }
             for (p, &raw) in values.iter().enumerate() {
                 // Local coordinates of pixel p within the tile, fastest first.
                 let mut q = p;

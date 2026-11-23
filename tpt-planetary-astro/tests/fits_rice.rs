@@ -1,4 +1,4 @@
-//! Decompresses the RICE_1 tile-compressed images that astropy wrote
+//! Decompresses the RICE_1, GZIP_1 and GZIP_2 tile-compressed images that astropy wrote
 //! (tools/gen_fits_rice_fixture.py) and compares every pixel with astropy's.
 
 use std::fs;
@@ -60,6 +60,18 @@ fn a_16_bit_tile_image_matches_astropy() {
 #[test]
 fn a_32_bit_tile_image_matches_astropy() {
     check("rice32.fits", "rice32");
+}
+
+#[test]
+fn gzip_1_tile_images_match_astropy() {
+    check("gzip1_16.fits", "gzip1_16");
+    check("gzip1_32.fits", "gzip1_32");
+}
+
+#[test]
+fn gzip_2_tile_images_match_astropy() {
+    check("gzip2_16.fits", "gzip2_16");
+    check("gzip2_32.fits", "gzip2_32");
 }
 
 #[test]
