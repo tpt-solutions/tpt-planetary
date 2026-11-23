@@ -24,16 +24,87 @@ use crate::lazy::{Block, Expr, NodeOp, Region};
 use crate::ops::nd::{element_count, empty_block, for_each_index, is_empty_region};
 use crate::ops::window::check_axis;
 
-/// Mean of the inputs in each group along `axis`.
+/// The aggregation of a group-by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupOp {
+    /// Sum of the valid inputs; zero for an empty group.
+    Sum,
+    /// Mean of the valid inputs; NaN (invalid) for an empty group.
+    Mean,
+    /// Smallest valid input; NaN (invalid) for an empty group.
+    Min,
+    /// Largest valid input; NaN (invalid) for an empty group.
+    Max,
+    /// Number of valid inputs; zero for an empty group.
+    Count,
+}
+
+/// One aggregation along `axis`.
 #[derive(Debug)]
-struct GroupMean {
+struct GroupReduce {
     input: Expr,
     axis: usize,
     labels: Vec<u32>,
+    op: GroupOp,
     shape: Vec<u64>,
 }
 
-impl NodeOp for GroupMean {
+/// Running sum, count, minimum and maximum of one output cell.
+#[derive(Debug, Clone, Copy)]
+struct Cell {
+    sum: f64,
+    count: u64,
+    min: f64,
+    max: f64,
+}
+
+impl Cell {
+    const EMPTY: Cell = Cell {
+        sum: 0.0,
+        count: 0,
+        min: f64::INFINITY,
+        max: f64::NEG_INFINITY,
+    };
+
+    fn push(&mut self, v: f64) {
+        self.count += 1;
+        self.sum += v;
+        self.min = self.min.min(v);
+        self.max = self.max.max(v);
+    }
+
+    /// The output value and whether it is valid.
+    fn finish(&self, op: GroupOp) -> (f64, bool) {
+        let empty = self.count == 0;
+        match op {
+            GroupOp::Sum => (self.sum, true),
+            GroupOp::Count => (self.count as f64, true),
+            GroupOp::Mean => {
+                if empty {
+                    (f64::NAN, false)
+                } else {
+                    (self.sum / self.count as f64, true)
+                }
+            }
+            GroupOp::Min => {
+                if empty {
+                    (f64::NAN, false)
+                } else {
+                    (self.min, true)
+                }
+            }
+            GroupOp::Max => {
+                if empty {
+                    (f64::NAN, false)
+                } else {
+                    (self.max, true)
+                }
+            }
+        }
+    }
+}
+
+impl NodeOp for GroupReduce {
     fn shape(&self) -> Vec<u64> {
         self.shape.clone()
     }
@@ -46,8 +117,7 @@ impl NodeOp for GroupMean {
         let out_counts = &region.count;
         let n = element_count(out_counts);
         let out_strides = c_strides(out_counts);
-        let mut sum = vec![0.0f64; n];
-        let mut count = vec![0u64; n];
+        let mut cells = vec![Cell::EMPTY; n];
 
         // Output index along the axis is `start + k * step`. Map each label to
         // its output position k, if it is one of the requested groups.
@@ -76,8 +146,7 @@ impl NodeOp for GroupMean {
                     off += (v * out_strides[d]) as usize;
                 }
                 if block.valid[j] {
-                    count[off] += 1;
-                    sum[off] += block.values[j];
+                    cells[off].push(block.values[j]);
                 }
                 j += 1;
             });
@@ -85,9 +154,9 @@ impl NodeOp for GroupMean {
 
         let mut values = Vec::with_capacity(n);
         let mut valid = Vec::with_capacity(n);
-        for (&s, &c) in sum.iter().zip(&count) {
-            let ok = c > 0;
-            values.push(if ok { s / c as f64 } else { f64::NAN });
+        for cell in &cells {
+            let (v, ok) = cell.finish(self.op);
+            values.push(v);
             valid.push(ok);
         }
         Ok(Block { values, valid })
@@ -95,21 +164,25 @@ impl NodeOp for GroupMean {
 }
 
 impl Expr {
-    /// Mean of the valid inputs in each group along `axis`.
+    /// Aggregates the valid inputs in each group along `axis` with `op`.
     ///
     /// `labels` has one entry per index along `axis` (its length must equal
-    /// that axis length). Output index `g` (for `g` in `0..groups`) is the mean
-    /// of all inputs whose label is `g`. The output has the input shape with
-    /// the axis length replaced by `groups`.
+    /// that axis length). Output index `g` (for `g` in `0..groups`) is the
+    /// aggregate of all inputs whose label is `g`. The output has the input
+    /// shape with the axis length replaced by `groups`. Labels at or above
+    /// `groups` are ignored.
     ///
-    /// ```
-    /// use tpt_planetary_array::lazy::Expr;
-    /// // Two groups over six points: label 0 for the first three, 1 for the rest.
-    /// let e = Expr::from_values(vec![6], vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]).unwrap();
-    /// let means = e.group_mean(0, &[0, 0, 0, 1, 1, 1], 2).unwrap();
-    /// assert_eq!(means.shape(), vec![2]);
-    /// ```
-    pub fn group_mean(&self, axis: usize, labels: &[u32], groups: u64) -> Result<Expr> {
+    /// # Errors
+    ///
+    /// Fails if `axis` is out of range, the label count does not match the axis
+    /// length, or `groups` is zero.
+    pub fn group_reduce(
+        &self,
+        axis: usize,
+        labels: &[u32],
+        groups: u64,
+        op: GroupOp,
+    ) -> Result<Expr> {
         let mut shape = self.shape();
         check_axis(&shape, axis)?;
         if labels.len() as u64 != shape[axis] {
@@ -123,12 +196,27 @@ impl Expr {
             return Err(Error::InvalidSelection("groups must be positive".into()));
         }
         shape[axis] = groups;
-        Ok(Expr::from_op(GroupMean {
+        Ok(Expr::from_op(GroupReduce {
             input: self.clone(),
             axis,
             labels: labels.to_vec(),
+            op,
             shape,
         }))
+    }
+
+    /// Mean of the valid inputs in each group along `axis` (see
+    /// [`Expr::group_reduce`]). An empty group is an invalid NaN.
+    ///
+    /// ```
+    /// use tpt_planetary_array::lazy::Expr;
+    /// // Two groups over six points: label 0 for the first three, 1 for the rest.
+    /// let e = Expr::from_values(vec![6], vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]).unwrap();
+    /// let means = e.group_mean(0, &[0, 0, 0, 1, 1, 1], 2).unwrap();
+    /// assert_eq!(means.shape(), vec![2]);
+    /// ```
+    pub fn group_mean(&self, axis: usize, labels: &[u32], groups: u64) -> Result<Expr> {
+        self.group_reduce(axis, labels, groups, GroupOp::Mean)
     }
 }
 
@@ -217,5 +305,149 @@ mod tests {
         assert!(e.group_mean(0, &[0, 1], 2).is_err());
         assert!(e.group_mean(0, &[0, 1, 0], 0).is_err());
         assert!(e.group_mean(1, &[0, 1, 0], 2).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod reduce_tests {
+    use super::*;
+
+    /// A 5 x 4 field (axis 0 is the grouped axis) with holes, grouped into 3
+    /// groups with label 3 ignored and group 2 left empty.
+    fn field() -> (Vec<f64>, Vec<u32>) {
+        let values: Vec<f64> = (0..20)
+            .map(|i| {
+                if i % 7 == 3 {
+                    f64::NAN
+                } else {
+                    f64::from(i) * 0.5 - 4.0
+                }
+            })
+            .collect();
+        let labels = vec![0u32, 1, 3, 0, 1];
+        (values, labels)
+    }
+
+    /// Brute-force aggregate of group `g` at column `c`.
+    fn brute(values: &[f64], labels: &[u32], g: u32, c: usize, op: GroupOp) -> (f64, bool) {
+        let mut cell = Cell::EMPTY;
+        for (row, &label) in labels.iter().enumerate() {
+            if label == g {
+                let v = values[row * 4 + c];
+                if !v.is_nan() {
+                    cell.push(v);
+                }
+            }
+        }
+        cell.finish(op)
+    }
+
+    #[test]
+    fn every_operation_matches_a_brute_force_group_aggregate() {
+        let (values, labels) = field();
+        let e = Expr::from_values(vec![5, 4], values.clone()).unwrap();
+        for op in [
+            GroupOp::Sum,
+            GroupOp::Mean,
+            GroupOp::Min,
+            GroupOp::Max,
+            GroupOp::Count,
+        ] {
+            let out = e.group_reduce(0, &labels, 3, op).unwrap();
+            assert_eq!(out.shape(), vec![3, 4]);
+            let got = out
+                .eval_region(&Region {
+                    start: vec![0, 0],
+                    count: vec![3, 4],
+                    step: vec![1, 1],
+                })
+                .unwrap();
+            for g in 0..3u32 {
+                for c in 0..4usize {
+                    let (want, ok) = brute(&values, &labels, g, c, op);
+                    let k = g as usize * 4 + c;
+                    assert_eq!(got.valid[k], ok, "{op:?} group {g} col {c}: validity");
+                    if ok {
+                        assert_eq!(
+                            got.values[k].to_bits(),
+                            want.to_bits(),
+                            "{op:?} group {g} col {c}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_groups_follow_their_operation() {
+        // Group 2 has no labels: Sum and Count are zero and valid; the rest are invalid.
+        let e = Expr::from_values(vec![2], vec![1.0, 2.0]).unwrap();
+        let region = Region {
+            start: vec![0],
+            count: vec![3],
+            step: vec![1],
+        };
+        let sum = e.group_reduce(0, &[0, 1], 3, GroupOp::Sum).unwrap();
+        let s = sum.eval_region(&region).unwrap();
+        assert_eq!((s.values[2], s.valid[2]), (0.0, true));
+        let min = e.group_reduce(0, &[0, 1], 3, GroupOp::Min).unwrap();
+        let m = min.eval_region(&region).unwrap();
+        assert!(!m.valid[2] && m.values[2].is_nan());
+    }
+
+    #[test]
+    fn a_region_evaluated_in_parts_matches_the_whole() {
+        let (values, labels) = field();
+        let e = Expr::from_values(vec![5, 4], values).unwrap();
+        let out = e.group_reduce(0, &labels, 3, GroupOp::Max).unwrap();
+        let whole = out
+            .eval_region(&Region {
+                start: vec![0, 0],
+                count: vec![3, 4],
+                step: vec![1, 1],
+            })
+            .unwrap();
+        for c in 0..4u64 {
+            let part = out
+                .eval_region(&Region {
+                    start: vec![0, c],
+                    count: vec![3, 1],
+                    step: vec![1, 1],
+                })
+                .unwrap();
+            for g in 0..3usize {
+                let k = g * 4 + c as usize;
+                assert_eq!(
+                    part.values[g].to_bits(),
+                    whole.values[k].to_bits(),
+                    "group {g} col {c}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn group_mean_is_the_mean_operation() {
+        let (values, labels) = field();
+        let e = Expr::from_values(vec![5, 4], values).unwrap();
+        let mean = e.group_mean(0, &labels, 3).unwrap();
+        let op = e.group_reduce(0, &labels, 3, GroupOp::Mean).unwrap();
+        let region = Region {
+            start: vec![0, 0],
+            count: vec![3, 4],
+            step: vec![1, 1],
+        };
+        let (a, b) = (
+            mean.eval_region(&region).unwrap(),
+            op.eval_region(&region).unwrap(),
+        );
+        assert_eq!(a.valid, b.valid);
+        assert!(
+            a.values
+                .iter()
+                .zip(&b.values)
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+        );
     }
 }
