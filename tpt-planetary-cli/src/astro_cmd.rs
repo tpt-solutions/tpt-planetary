@@ -7,7 +7,7 @@
 //! Galactic to ecliptic goes through ICRS. Coordinates are `LON,LAT` in
 //! degrees. Other frames and time scales are reported as not implemented (exit 3).
 
-use tpt_planetary_astro::eop::{EopError, EopTable, FINALS2000A_COLUMNS, parse_finals2000a};
+use tpt_planetary_astro::eop::{EopError, EopTable, parse_eop_text};
 use tpt_planetary_astro::frames::{Galactic, Icrs, MeanEcliptic, SkyCoord};
 use tpt_planetary_astro::nutation::{
     TrueEclipticOfDate, icrs_to_true_ecliptic_of_date, true_ecliptic_of_date_to_icrs,
@@ -406,7 +406,7 @@ fn render_time(ct: &CivilTime, jd: JulianDate, to: Scale, format: OutputFormat) 
 
 /// Converts to or from UT1. UT1 is bridged through UTC: a UT1 input becomes
 /// UTC with the offset UT1 - UTC from the IERS table, and a UT1 output is UTC
-/// plus that offset. The table comes from an IERS finals2000A file given by
+/// plus that offset. The table comes from an IERS finals2000A or C04 file given by
 /// `--eop`; its rows must be daily around the epoch.
 fn convert_ut1(
     ct: &CivilTime,
@@ -418,7 +418,7 @@ fn convert_ut1(
     let path = eop.ok_or_else(|| {
         Failure::new(
             EXIT_USAGE,
-            "UT1 needs --eop FILE, an IERS finals2000A file, for UT1 - UTC".to_string(),
+            "UT1 needs --eop FILE, an IERS finals2000A or C04 file, for UT1 - UTC".to_string(),
         )
     })?;
     let text = std::fs::read_to_string(path).map_err(|e| {
@@ -427,7 +427,7 @@ fn convert_ut1(
             format!("cannot read EOP file '{}': {e}", path.display()),
         )
     })?;
-    let records = parse_finals2000a(&text, &FINALS2000A_COLUMNS).map_err(|e| {
+    let records = parse_eop_text(&text).map_err(|e| {
         Failure::new(
             EXIT_RUNTIME,
             format!("cannot parse EOP file '{}': {e}", path.display()),

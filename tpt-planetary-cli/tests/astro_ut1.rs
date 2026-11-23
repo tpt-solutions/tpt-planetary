@@ -149,3 +149,36 @@ fn a_missing_eop_file_is_a_runtime_error() {
     ]);
     assert_eq!(code(&out), 1);
 }
+
+fn c04_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("tpt-planetary-astro")
+        .join("tests")
+        .join("fixtures")
+        .join("eop")
+        .join("c04_excerpt.txt")
+}
+
+#[test]
+fn a_c04_series_is_read_for_ut1() {
+    // Linear midpoint of the C04 rows for 2017-09-05 (0.3353744 s) and
+    // 2017-09-06 (0.3348027 s).
+    let eop = c04_file();
+    let out = tptplan(&[
+        "--format",
+        "json",
+        "astro",
+        "convert",
+        "2017-09-05T12:00:00",
+        "--from",
+        "utc",
+        "--to",
+        "ut1",
+        "--eop",
+        eop.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let offset = seconds_of_day(&timestamp(&out)) - 12.0 * 3600.0;
+    assert!((offset - 0.33508855).abs() < 2e-6, "offset {offset}");
+}

@@ -255,6 +255,78 @@ pub fn parse_finals2000a(text: &str, cols: &ColumnMap) -> Result<Vec<EopRecord>,
     Ok(out)
 }
 
+/// Fields of an IERS C04 line, zero-based. The readme format is
+/// `4(i4), f10.2, 2(f12.6), f12.7, 2(f12.6), 2(f12.6), f12.7, ...`: the
+/// calendar date and hour, the MJD, x, y, UT1-UTC, dX, dY, xrt, yrt and LOD.
+const C04_MJD: Span = Span::new(16, 26);
+const C04_X: Span = Span::new(26, 38);
+const C04_Y: Span = Span::new(38, 50);
+const C04_UT1: Span = Span::new(50, 62);
+const C04_LOD: Span = Span::new(110, 122);
+
+/// Parses one line of an IERS C04 time series (`eopc04.1962-now`).
+///
+/// Returns `Ok(None)` for blank lines and for `#` header lines. The C04 series
+/// is sampled at 0h UTC, so each data line is one day. Its LOD is in seconds
+/// and is returned in milliseconds, like the `finals2000A` LOD.
+///
+/// # Errors
+///
+/// [`EopError::BadLine`] if a field is short or not a finite number.
+pub fn parse_c04_line(line: &str) -> Result<Option<EopRecord>, EopError> {
+    if line.trim().is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+    Ok(Some(EopRecord {
+        mjd: field_f64(line, C04_MJD, "mjd")?,
+        xp_arcsec: field_f64(line, C04_X, "x")?,
+        yp_arcsec: field_f64(line, C04_Y, "y")?,
+        dut1_seconds: field_f64(line, C04_UT1, "ut1_utc")?,
+        lod_ms: Some(field_f64(line, C04_LOD, "lod")? * 1000.0),
+    }))
+}
+
+/// Parses all data rows of an IERS C04 time series.
+///
+/// # Errors
+///
+/// [`EopError::BadLine`] with the one-based line number of the first malformed
+/// data row.
+#[cfg(feature = "std")]
+pub fn parse_c04(text: &str) -> Result<Vec<EopRecord>, EopError> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        match parse_c04_line(line) {
+            Ok(Some(rec)) => out.push(rec),
+            Ok(None) => {}
+            Err(EopError::BadLine { field, .. }) => {
+                return Err(EopError::BadLine { line: i + 1, field });
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(out)
+}
+
+/// Parses an EOP file in either supported format.
+///
+/// A C04 file starts with `#` header lines; anything else is read as
+/// `finals2000A` with the default column map. The format is decided by the first
+/// non-blank line.
+///
+/// # Errors
+///
+/// The errors of [`parse_c04`] or [`parse_finals2000a`].
+#[cfg(feature = "std")]
+pub fn parse_eop_text(text: &str) -> Result<Vec<EopRecord>, EopError> {
+    let first = text.lines().find(|l| !l.trim().is_empty());
+    if first.is_some_and(|l| l.starts_with('#')) {
+        parse_c04(text)
+    } else {
+        parse_finals2000a(text, &FINALS2000A_COLUMNS)
+    }
+}
+
 /// A validated, read-only table of EOP rows sorted by MJD.
 ///
 /// The table borrows its rows, so it needs no allocation. Build the rows with

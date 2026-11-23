@@ -227,7 +227,7 @@ pub enum AstroCommand {
         /// `ecliptic-date` and `true-ecliptic-date`.
         #[arg(long)]
         epoch: Option<String>,
-        /// IERS finals2000A file (daily rows around the epoch), needed for UT1 - UTC.
+        /// IERS finals2000A or C04 file (daily rows around the epoch), needed for UT1 - UTC.
         #[arg(long, value_name = "PATH")]
         eop: Option<std::path::PathBuf>,
     },
