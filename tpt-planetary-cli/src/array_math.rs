@@ -24,7 +24,7 @@
 //! The functions take one input array of shape [time, lat, lon] with monthly
 //! steps. `anomaly` is the monthly anomaly and keeps the shape. `nino34` and
 //! `nino34_relative` are the Niño-3.4 indices of `tptplan array index`: they
-//! have shape [time], and need the grid of the input (`--lat-start`,
+//! have shape \[time\], and need the grid of the input (`--lat-start`,
 //! `--lat-step`, `--lon-start`, `--lon-step`).
 //!
 //! Operators are IEEE: division by zero gives infinities or NaN. Unary minus
@@ -70,9 +70,9 @@ pub enum Ast {
 pub enum Func {
     /// Monthly anomaly of a [time, lat, lon] field.
     Anomaly,
-    /// The Niño-3.4 index (shape [time]).
+    /// The Niño-3.4 index (shape \[time\]).
     Nino34,
-    /// The relative Niño-3.4 index (shape [time]).
+    /// The relative Niño-3.4 index (shape \[time\]).
     Nino34Relative,
 }
 
