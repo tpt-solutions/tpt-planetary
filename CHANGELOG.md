@@ -100,7 +100,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - FITS ASCII table writer (`fits::write_ascii_table`) for A, I, Fw.d and Ew.d fields,
   with TSCAL, TZERO and TNULL; checked by a round trip and by astropy.
 - FITS tile-compressed images: `Hdu::compressed_values` decompresses RICE_1, GZIP_1 and GZIP_2
-  integer tiles, and quantized float tiles without dithering (NO_DITHER), checked against astropy.
+  integer tiles, and quantized float tiles, with or without dithering (NO_DITHER, SUBTRACTIVE_DITHER_1 and _2),
+  checked against astropy.
 - FITS bit, complex and variable-length binary columns: `read_bits`, `read_complex`
   and `read_vla` (with the heap and THEAP), checked against astropy.
 - FITS ASCII tables: `Hdu::ascii_table` reads `XTENSION = 'TABLE'` columns of A, I,

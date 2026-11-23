@@ -463,3 +463,98 @@ mod tests {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
     }
 }
+
+/// Length of the dither sequence (CFITSIO's `N_RANDOM`).
+pub const N_RANDOM: usize = 10_000;
+
+/// The dither sequence of CFITSIO: `N_RANDOM` uniform values in (0, 1), from the
+/// Park–Miller minimal standard generator (a = 16807, m = 2^31 - 1, seed 1),
+/// stored as float32 as CFITSIO does. The 10000th seed is 1043618065.
+pub fn dither_sequence() -> Vec<f32> {
+    let a = 16807.0f64;
+    let m = 2_147_483_647.0f64;
+    let mut seed = 1.0f64;
+    (0..N_RANDOM)
+        .map(|_| {
+            let temp = a * seed;
+            seed = temp - m * ((temp / m) as i64 as f64);
+            (seed / m) as f32
+        })
+        .collect()
+}
+
+/// Unquantizes one dithered float tile in place of its pixels.
+///
+/// `q` holds the stored integers of the tile in pixel order, `row` is the tile's
+/// dither row (its 1-based table row plus `ZDITHER0`, minus 1), and `scale` and
+/// `zero` are the tile's `ZSCALE` and `ZZERO`. Each pixel is
+/// `(q - r + 0.5) * scale + zero` with `r` the next value of the sequence, as
+/// CFITSIO computes it, rounded to float32. Undefined pixels (`q == blank`) are
+/// NaN. With `zero_preserving` (SUBTRACTIVE_DITHER_2), pixels stored as the zero
+/// code are exactly 0.0. Every pixel advances the sequence, undefined or not.
+/// The parameters of one dithered float tile.
+#[derive(Debug, Clone, Copy)]
+pub struct Dither<'a> {
+    /// The tile's dither row: its 1-based table row plus `ZDITHER0`, minus 1.
+    pub row: usize,
+    /// `ZSCALE` of the tile.
+    pub scale: f64,
+    /// `ZZERO` of the tile.
+    pub zero: f64,
+    /// The stored value of an undefined pixel.
+    pub blank: i32,
+    /// SUBTRACTIVE_DITHER_2: pixels stored as the zero code are exactly 0.0.
+    pub zero_preserving: bool,
+    /// The dither sequence, from [`dither_sequence`].
+    pub seq: &'a [f32],
+}
+
+pub fn unquantize_dithered(q: &[i32], params: &Dither<'_>, out: &mut [f64]) {
+    let Dither {
+        row,
+        scale,
+        zero,
+        blank,
+        zero_preserving,
+        seq,
+    } = *params;
+    // The start: iseed = (row - 1) mod N, nextrand = int(500 * seq[iseed]).
+    let mut iseed = (row - 1) % N_RANDOM;
+    let mut nextrand = (f64::from(seq[iseed]) * 500.0) as usize;
+    for (value, &stored) in out.iter_mut().zip(q) {
+        let r = f64::from(seq[nextrand]);
+        *value = if stored == blank {
+            f64::NAN
+        } else if zero_preserving && stored == ZERO_CODE {
+            0.0
+        } else {
+            f64::from(((f64::from(stored) - r + 0.5) * scale + zero) as f32)
+        };
+        nextrand += 1;
+        if nextrand == N_RANDOM {
+            iseed += 1;
+            if iseed == N_RANDOM {
+                iseed = 0;
+            }
+            nextrand = (f64::from(seq[iseed]) * 500.0) as usize;
+        }
+    }
+}
+
+/// The integer stored for a zero pixel by SUBTRACTIVE_DITHER_2 (CFITSIO's `ZERO_VALUE`).
+pub const ZERO_CODE: i32 = -2_147_483_646;
+
+#[cfg(all(test, feature = "std"))]
+mod dither_tests {
+    use super::*;
+
+    #[test]
+    fn the_dither_sequence_matches_cfitsio() {
+        let seq = dither_sequence();
+        assert_eq!(seq.len(), N_RANDOM);
+        // The 10000th seed is 1043618065; the stored value is that over m, in float32.
+        let want = (1_043_618_065.0f64 / 2_147_483_647.0) as f32;
+        assert_eq!(seq[N_RANDOM - 1], want);
+        assert!(seq.iter().all(|&v| v > 0.0 && v < 1.0));
+    }
+}

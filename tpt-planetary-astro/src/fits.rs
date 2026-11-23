@@ -14,12 +14,13 @@
 //! - Fixed-format and free-format cards, with `''` escapes in strings and
 //!   Fortran `D` exponents in numbers.
 //!
-//! Tile-compressed integer images with `RICE_1` are decompressed by
-//! [`Hdu::compressed_values`], and integer images can be written tile-compressed
-//! with [`write_compressed_image`]. Not supported, and rejected with an error:
-//! dithered quantized float tiles, other tile compression (`HCOMPRESS`, `PLIO`),
-//! writing float or quantized images, random groups, and `CONTINUE` long-string cards. A `HIERARCH` card is returned as a commentary card
-//! and is not interpreted.
+//! Tile-compressed images (`RICE_1`, `GZIP_1`, `GZIP_2`) are decompressed by
+//! [`Hdu::compressed_values`], including quantized float tiles with no dithering
+//! or with `SUBTRACTIVE_DITHER_1` and `_2`. Integer images can be written
+//! tile-compressed with [`write_compressed_image`]. Not supported, and rejected
+//! with an error: other tile compression (`HCOMPRESS`, `PLIO`), writing float or
+//! quantized images, random groups, and `CONTINUE` long-string cards. A `HIERARCH`
+//! card is returned as a commentary card and is not interpreted.
 //! A final data block that lacks its zero padding is accepted.
 //!
 //! Pixel order follows FITS: axis 1 varies fastest, so the flat index of a
@@ -710,16 +711,36 @@ impl<'a> Hdu<'a> {
             }
         };
         let quantized = zbitpix == -32;
-        if quantized {
+        // How the float tiles were quantized: none (NO_DITHER, the default) or one
+        // of CFITSIO's subtractive dithers.
+        let dither = if quantized {
             match text("ZQUANTIZ") {
-                None | Some("NO_DITHER") => {}
+                None | Some("NO_DITHER") => None,
+                Some("SUBTRACTIVE_DITHER_1") => Some(false),
+                Some("SUBTRACTIVE_DITHER_2") => Some(true),
                 Some(_) => {
                     return Err(FitsError::Unsupported(
-                        "quantized tiles with dithering (ZQUANTIZ other than NO_DITHER)",
+                        "quantization method other than NO_DITHER, SUBTRACTIVE_DITHER_1 and _2",
                     ));
                 }
             }
-        }
+        } else {
+            None
+        };
+        // The dither seed of the tiles (ZDITHER0) and the sequence they draw from.
+        let zdither0 = match dither {
+            Some(_) => Some(
+                header
+                    .get("ZDITHER0")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&v| v >= 1)
+                    .ok_or(FitsError::InvalidHeader(
+                        "ZDITHER0 missing for dithered tiles",
+                    ))?,
+            ),
+            None => None,
+        };
+        let dither_sequence = dither.map(|_| tile::dither_sequence());
         let naxis = header
             .get("ZNAXIS")
             .and_then(|v| v.as_i64())
@@ -782,10 +803,16 @@ impl<'a> Hdu<'a> {
         } else {
             (Vec::new(), Vec::new())
         };
+        // The stored value of an undefined pixel: CFITSIO's NULL_VALUE for dithered
+        // tiles, and the value of the ZBLANK keyword (or -2^31) otherwise.
         let blank = header
             .get("ZBLANK")
             .and_then(|v| v.as_i64())
-            .unwrap_or(-2_147_483_648);
+            .unwrap_or(if dither.is_some() {
+                -2_147_483_647
+            } else {
+                -2_147_483_648
+            });
         let pixel_total: usize = dims.iter().product();
         let mut out = vec![0.0f64; pixel_total];
 
@@ -828,6 +855,26 @@ impl<'a> Hdu<'a> {
                     &mut values,
                 )?,
             }
+            // Dithered float tiles are unquantized as a whole: the dither sequence
+            // runs over the tile's pixels in order.
+            let dither_tile: Option<Vec<f64>> = match (dither, &dither_sequence) {
+                (Some(zero_preserving), Some(seq)) => {
+                    let q: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                    let mut unq = vec![0.0f64; npix];
+                    let row = tile_index + zdither0.unwrap_or(1) as usize;
+                    let params = tile::Dither {
+                        row,
+                        scale: scales[tile_index],
+                        zero: zeros[tile_index],
+                        blank: blank as i32,
+                        zero_preserving,
+                        seq,
+                    };
+                    tile::unquantize_dithered(&q, &params, &mut unq);
+                    Some(unq)
+                }
+                _ => None,
+            };
             for (p, &raw) in values.iter().enumerate() {
                 // Local coordinates of pixel p within the tile, fastest first.
                 let mut q = p;
@@ -838,12 +885,20 @@ impl<'a> Hdu<'a> {
                     flat += (origin[k] + c) * stride[k];
                 }
                 if quantized {
-                    let q = raw as i32;
-                    out[flat] = if i64::from(q) == blank {
-                        f64::NAN
-                    } else {
-                        // Rounded to float32, as the BITPIX -32 image holds it.
-                        f64::from((zeros[tile_index] + scales[tile_index] * f64::from(q)) as f32)
+                    out[flat] = match (dither, &dither_tile) {
+                        // Dithered tiles were unquantized as a whole, in pixel order.
+                        (Some(_), Some(unq)) => unq[p],
+                        _ => {
+                            let q = raw as i32;
+                            if i64::from(q) == blank {
+                                f64::NAN
+                            } else {
+                                // Rounded to float32, as the BITPIX -32 image holds it.
+                                f64::from(
+                                    (zeros[tile_index] + scales[tile_index] * f64::from(q)) as f32,
+                                )
+                            }
+                        }
                     };
                     continue;
                 }
