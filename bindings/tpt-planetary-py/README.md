@@ -4,7 +4,16 @@ PyO3 bindings for the tpt-planetary Rust crates: two-part Julian Dates and
 UTC/TAI/TT conversion, ICRS/Galactic transforms, ERA/GMST, FITS-style WCS
 (TAN, SIN, AIT), and reads and lazy reductions on local Zarr arrays.
 
-This package is MIT OR Apache-2.0. It is not published to PyPI yet.
+**Status:** version 0.1.0, not yet published to PyPI. The API may change before
+1.0. The bindings are a thin layer over the Rust crates
+[tpt-planetary-core](https://github.com/tpt-solutions/tpt-planetary/tree/master/tpt-planetary-core),
+[tpt-planetary-astro](https://github.com/tpt-solutions/tpt-planetary/tree/master/tpt-planetary-astro)
+and
+[tpt-planetary-array](https://github.com/tpt-solutions/tpt-planetary/tree/master/tpt-planetary-array),
+so a numerical result here is the result of the Rust code. Limits are listed
+under [Not supported in this release](#not-supported-in-this-release).
+
+This package is MIT OR Apache-2.0.
 
 ## Build from source
 
@@ -104,3 +113,31 @@ The full signatures are in `python/tpt_planetary/__init__.pyi`.
 Wheels for manylinux and musllinux (x86_64, aarch64), macOS (x86_64, arm64)
 and Windows (x86_64) are built by a CI workflow kept outside this crate. Build
 them with `maturin build --release` on each platform and attach the results to the release.
+
+## Development
+
+```sh
+maturin develop                  # rebuild the extension into the active virtualenv
+pytest tests -q                  # unit tests for the bindings
+pytest tests/validation -q       # comparisons with astropy, pyerfa, sgp4 and numpy
+```
+
+The `validation` tests need the optional reference packages (astropy, pyerfa,
+sgp4) installed. They are not needed to use the package. The `examples/`
+directory has a benchmark script and a notebook that runs a small dataflow.
+
+The crate's `Cargo.toml` sets `publish = false`. The package is built for PyPI by
+maturin, not for crates.io.
+
+## Changelog
+
+Changes to the Python package are in [CHANGELOG.md](CHANGELOG.md).
+
+## Licence
+
+Dual-licensed under either of
+
+- MIT licence ([LICENSE-MIT](https://github.com/tpt-solutions/tpt-planetary/blob/master/LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/tpt-solutions/tpt-planetary/blob/master/LICENSE-APACHE))
+
+at your option.
