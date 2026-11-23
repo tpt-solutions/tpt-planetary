@@ -39,6 +39,9 @@
 //! - `altaz`: `ra_deg dec_deg lon_deg lat_deg tt_hi tt_lo ut1_hi ut1_lo xp_arcsec yp_arcsec`
 //!   -> `az_deg alt_deg` for an ICRS direction seen from a WGS84 geodetic observer
 //!   (no refraction, aberration or parallax; see `frames::icrs_to_altaz_at`).
+//! - `altaz_refracted`: the fields of `altaz` followed by `pressure_hPa temp_C
+//!   humidity wavelength_um` -> `az_deg alt_deg`, with the refraction of
+//!   `frames::icrs_to_altaz_refracted_at` (still no aberration or parallax).
 //! - `c2t_xys`: `x y s era sp xp yp` (radians) -> the nine elements of the
 //!   chain matrix built from those components (row-major). Used with ERFA's
 //!   own `xys06a`, `era00` and `sp00` to isolate the matrix algebra.
@@ -49,8 +52,8 @@ use tpt_planetary_astro::cio;
 use tpt_planetary_astro::eop::ARCSEC_TO_RAD;
 use tpt_planetary_astro::ephemeris::earth_sun_distance_au_approx;
 use tpt_planetary_astro::frames::{
-    GeodeticObserver, Icrs, MeanEcliptic, SkyCoord, TransformContext, icrs_to_altaz_at,
-    polar_motion_matrix,
+    Atmosphere, GeodeticObserver, Icrs, MeanEcliptic, SkyCoord, TransformContext, icrs_to_altaz_at,
+    icrs_to_altaz_refracted_at, polar_motion_matrix,
 };
 use tpt_planetary_astro::nutation;
 use tpt_planetary_astro::precession;
@@ -190,6 +193,19 @@ fn main() {
                     let obs = GeodeticObserver::from_degrees(v[2], v[3], 0.0);
                     let ctx = TransformContext::new((v[4], v[5]), (v[6], v[7]), v[8], v[9]);
                     let a = icrs_to_altaz_at(star, obs, &ctx);
+                    format!("{} {}", a.lon_deg(), a.lat_deg())
+                }),
+                "altaz_refracted" => parse_fields(&line, 14).map(|v| {
+                    let star = SkyCoord::<Icrs>::from_degrees(v[0], v[1]);
+                    let obs = GeodeticObserver::from_degrees(v[2], v[3], 0.0);
+                    let ctx = TransformContext::new((v[4], v[5]), (v[6], v[7]), v[8], v[9]);
+                    let atmosphere = Atmosphere {
+                        pressure_hpa: v[10],
+                        temperature_c: v[11],
+                        relative_humidity: v[12],
+                        wavelength_um: v[13],
+                    };
+                    let a = icrs_to_altaz_refracted_at(star, obs, &ctx, atmosphere);
                     format!("{} {}", a.lon_deg(), a.lat_deg())
                 }),
                 _ => None,
