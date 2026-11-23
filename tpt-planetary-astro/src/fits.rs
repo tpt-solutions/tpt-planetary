@@ -698,16 +698,28 @@ impl<'a> Hdu<'a> {
             .get("ZBITPIX")
             .and_then(|v| v.as_i64())
             .ok_or(FitsError::InvalidHeader("ZBITPIX missing"))?;
+        // Float images (ZBITPIX -32) are quantized to 32-bit integers per tile.
         let default_bytepix = match zbitpix {
             8 => 1,
             16 => 2,
-            32 => 4,
+            32 | -32 => 4,
             _ => {
                 return Err(FitsError::Unsupported(
-                    "compressed images other than integer 8, 16 or 32 bits",
+                    "compressed images other than 8, 16, 32 or -32 bits",
                 ));
             }
         };
+        let quantized = zbitpix == -32;
+        if quantized {
+            match text("ZQUANTIZ") {
+                None | Some("NO_DITHER") => {}
+                Some(_) => {
+                    return Err(FitsError::Unsupported(
+                        "quantized tiles with dithering (ZQUANTIZ other than NO_DITHER)",
+                    ));
+                }
+            }
+        }
         let naxis = header
             .get("ZNAXIS")
             .and_then(|v| v.as_i64())
@@ -764,6 +776,16 @@ impl<'a> Hdu<'a> {
             ));
         }
         let descriptors = table.read_vla("COMPRESSED_DATA")?;
+        // Per-tile scale and offset of quantized float images: value = zero + scale * q.
+        let (scales, zeros) = if quantized {
+            (table.read_f64("ZSCALE")?, table.read_f64("ZZERO")?)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let blank = header
+            .get("ZBLANK")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-2_147_483_648);
         let pixel_total: usize = dims.iter().product();
         let mut out = vec![0.0f64; pixel_total];
 
@@ -775,9 +797,9 @@ impl<'a> Hdu<'a> {
             acc *= d;
         }
         let mut stream = Vec::new();
-        for (t, row) in descriptors.iter().enumerate() {
+        for (tile_index, row) in descriptors.iter().enumerate() {
             // Origin of this tile in the grid, fastest axis first.
-            let mut rest = t;
+            let mut rest = tile_index;
             let mut origin = Vec::with_capacity(naxis);
             let mut extent = Vec::with_capacity(naxis);
             for k in 0..naxis {
@@ -793,8 +815,18 @@ impl<'a> Hdu<'a> {
             let mut values = vec![0u32; npix];
             match method {
                 "RICE_1" => tile::rice_decode(&stream, bytepix, blocksize, &mut values)?,
-                "GZIP_1" => tile::gzip_decode(&stream, (zbitpix / 8) as usize, false, &mut values)?,
-                _ => tile::gzip_decode(&stream, (zbitpix / 8) as usize, true, &mut values)?,
+                "GZIP_1" => tile::gzip_decode(
+                    &stream,
+                    (zbitpix.unsigned_abs() / 8) as usize,
+                    false,
+                    &mut values,
+                )?,
+                _ => tile::gzip_decode(
+                    &stream,
+                    (zbitpix.unsigned_abs() / 8) as usize,
+                    true,
+                    &mut values,
+                )?,
             }
             for (p, &raw) in values.iter().enumerate() {
                 // Local coordinates of pixel p within the tile, fastest first.
@@ -804,6 +836,16 @@ impl<'a> Hdu<'a> {
                     let c = q % extent[k];
                     q /= extent[k];
                     flat += (origin[k] + c) * stride[k];
+                }
+                if quantized {
+                    let q = raw as i32;
+                    out[flat] = if i64::from(q) == blank {
+                        f64::NAN
+                    } else {
+                        // Rounded to float32, as the BITPIX -32 image holds it.
+                        f64::from((zeros[tile_index] + scales[tile_index] * f64::from(q)) as f32)
+                    };
+                    continue;
                 }
                 let stored = match zbitpix {
                     8 => f64::from(raw as u8),

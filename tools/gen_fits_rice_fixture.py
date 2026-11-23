@@ -33,7 +33,20 @@ CASES = {
     "gzip1_32": (np.int32, "GZIP_1", 32),
     "gzip2_16": (np.int16, "GZIP_2", 16),
     "gzip2_32": (np.int32, "GZIP_2", 32),
+    # Float images, quantized to 16 levels per tile with no dithering (astropy's default).
+    "flt_rice": (np.float32, "RICE_1", -32),
+    "flt_gzip1": (np.float32, "GZIP_1", -32),
 }
+
+
+def float_image(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    rows, cols = SHAPE
+    y, x = np.mgrid[0:rows, 0:cols]
+    img = (0.3 * np.sin(x / 6.0) + 0.2 * np.cos(y / 4.0) + rng.normal(0.0, 0.01, SHAPE))
+    img = img.astype(np.float32)
+    img[3, 4] = np.nan  # an undefined pixel, stored as ZBLANK
+    return img
 
 
 def image(seed: int, dtype) -> np.ndarray:
@@ -52,8 +65,11 @@ def image(seed: int, dtype) -> np.ndarray:
 
 
 def write(path: Path, data: np.ndarray, compression: str) -> None:
+    extra = {}
+    if data.dtype == np.float32:
+        extra = {"quantize_method": -1, "quantize_level": 16.0}
     hdu = fits.CompImageHDU(
-        data=data, compression_type=compression, tile_shape=(TILE[1], TILE[0])
+        data=data, compression_type=compression, tile_shape=(TILE[1], TILE[0]), **extra
     )
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
 
@@ -62,12 +78,18 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     lines = []
     for index, (name, (dtype, compression, bits)) in enumerate(CASES.items()):
-        data = image(100 + index, dtype)
+        data = float_image(200 + index) if dtype == np.float32 else image(100 + index, dtype)
         path = OUT / f"{name}.fits"
         write(path, data, compression)
         back = np.asarray(fits.open(path)[1].data)
-        assert np.array_equal(back, data), f"{name}: astropy round trip"
-        values = " ".join(str(int(v)) for v in back.ravel())
+        if not np.issubdtype(data.dtype, np.floating):
+            # Integer images are lossless. Quantized float images are not: the
+            # expected values are astropy's decompression of them.
+            assert np.array_equal(back, data), f"{name}: astropy round trip"
+        if np.issubdtype(back.dtype, np.floating):
+            values = " ".join("nan" if np.isnan(v) else repr(float(v)) for v in back.ravel())
+        else:
+            values = " ".join(str(int(v)) for v in back.ravel())
         lines.append(f"{name}\t{back.shape[0]}x{back.shape[1]}\t{values}")
     (OUT / "rice_expected.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {len(CASES)} compressed fixtures and rice_expected.tsv")

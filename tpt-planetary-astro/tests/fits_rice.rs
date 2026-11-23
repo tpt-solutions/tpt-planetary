@@ -48,7 +48,10 @@ fn check(file: &str, name: &str) {
         .expect("expected row");
     assert_eq!(got.len(), want.len(), "{name}: pixel count ({shape})");
     for (i, (g, w)) in got.iter().zip(&want).enumerate() {
-        assert_eq!(g, w, "{name}: pixel {i}");
+        assert!(
+            (g.is_nan() && w.is_nan()) || g == w,
+            "{name}: pixel {i}: got {g}, want {w}"
+        );
     }
 }
 
@@ -72,6 +75,13 @@ fn gzip_1_tile_images_match_astropy() {
 fn gzip_2_tile_images_match_astropy() {
     check("gzip2_16.fits", "gzip2_16");
     check("gzip2_32.fits", "gzip2_32");
+}
+
+#[test]
+fn quantized_float_tile_images_match_astropy() {
+    // Quantized to 16 levels per tile with no dithering; NaN is the blank value.
+    check("flt_rice.fits", "flt_rice");
+    check("flt_gzip1.fits", "flt_gzip1");
 }
 
 #[test]
