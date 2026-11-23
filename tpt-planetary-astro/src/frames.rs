@@ -27,7 +27,7 @@ use tpt_planetary_core::angle::Radians;
 use tpt_planetary_core::ellipsoid::{Geodetic, WGS84};
 
 use crate::cio;
-use crate::eop::ARCSEC_TO_RAD;
+use crate::eop::{ARCSEC_TO_RAD, EopError, EopTable};
 use crate::time;
 
 /// Radians per degree.
@@ -504,6 +504,61 @@ impl TransformContext {
             xp: xp_arcsec * ARCSEC_TO_RAD,
             yp: yp_arcsec * ARCSEC_TO_RAD,
         }
+    }
+}
+
+/// Error building a [`TransformContext`] from a UTC epoch and an EOP table.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum ContextError {
+    /// The epoch could not be converted to TT (outside the leap-second table).
+    Time(tpt_planetary_core::Error),
+    /// The EOP table does not cover the epoch, or its rows are unusable.
+    Eop(EopError),
+}
+
+impl core::fmt::Display for ContextError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ContextError::Time(e) => write!(f, "cannot convert the epoch to TT: {e}"),
+            ContextError::Eop(e) => write!(f, "Earth orientation data: {e}"),
+        }
+    }
+}
+
+impl From<EopError> for ContextError {
+    fn from(e: EopError) -> Self {
+        ContextError::Eop(e)
+    }
+}
+
+impl TransformContext {
+    /// Builds the context for a UTC epoch: TT from the leap-second table, UT1
+    /// from `UT1 - UTC` in the EOP table, and the polar motion of the epoch.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextError::Time`] if the epoch is outside the leap-second table, or
+    /// [`ContextError::Eop`] if the EOP table has no row range covering it.
+    pub fn from_utc_and_eop(
+        utc: tpt_planetary_core::scale::Epoch<tpt_planetary_core::scale::Utc>,
+        eop: &EopTable<'_>,
+        leap: &tpt_planetary_core::leap::LeapSecondTable<'_>,
+    ) -> Result<Self, ContextError> {
+        use tpt_planetary_core::scale::{Epoch, Tt};
+
+        let tt: Epoch<Tt> = utc.to_scale(leap).map_err(ContextError::Time)?;
+        let utc_jd = utc.jd();
+        let ut1 = eop.utc_to_ut1(utc_jd.day(), utc_jd.fraction())?;
+        let mjd_utc = (utc_jd.day() - 2_400_000.5) + utc_jd.fraction();
+        let (xp, yp) = eop.polar_motion_arcsec(mjd_utc)?;
+        let tt_jd = tt.jd();
+        Ok(TransformContext::new(
+            (tt_jd.day(), tt_jd.fraction()),
+            ut1,
+            xp,
+            yp,
+        ))
     }
 }
 
