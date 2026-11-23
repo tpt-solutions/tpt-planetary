@@ -128,6 +128,18 @@ pub enum ArrayCommand {
         /// Zarr format of the output: 2 or 3.
         #[arg(long, value_name = "2|3", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=3))]
         zarr_format: u8,
+        /// Latitude of the first row of the inputs' grid, in degrees (for the indices).
+        #[arg(long, allow_hyphen_values = true)]
+        lat_start: Option<f64>,
+        /// Latitude step of the grid, in degrees (positive).
+        #[arg(long, allow_hyphen_values = true)]
+        lat_step: Option<f64>,
+        /// Longitude of the first column of the grid, in degrees east (for the indices).
+        #[arg(long, allow_hyphen_values = true)]
+        lon_start: Option<f64>,
+        /// Longitude step of the grid, in degrees (positive).
+        #[arg(long, allow_hyphen_values = true)]
+        lon_step: Option<f64>,
     },
     /// Climate index of a [time, lat, lon] Zarr field, computed lazily.
     Index {
@@ -174,11 +186,19 @@ GRAMMAR
   expression := term (('+' | '-') term)*
   term       := unary (('*' | '/') unary)*
   unary      := '-' unary | primary
-  primary    := NUMBER | NAME | '(' expression ')'
+  primary    := NUMBER | NAME | FUNC '(' NAME ')' | '(' expression ')'
+  FUNC       := anomaly | nino34 | nino34_relative
 
   NUMBER   digits with an optional fraction and exponent, such as 2, 0.5, 1e-3
   NAME     a letter or '_' then letters, digits or '_'; each name needs an
            --input NAME=PATH argument
+
+FUNCTIONS
+  anomaly(x)          the monthly anomaly of a [time, lat, lon] field (same shape)
+  nino34(x)           the Nino-3.4 index, shape [time], from the same field
+  nino34_relative(x)  the relative Nino-3.4 index, shape [time]
+  The two indices need the grid of x: --lat-start, --lat-step, --lon-start and
+  --lon-step, in degrees, as for `array index`.
 
 Unary minus binds tighter than '*' and '/', so -a * b is (-a) * b. Division
 follows IEEE rules. Fill-valued and NaN inputs give NaN in the output.
@@ -396,13 +416,39 @@ fn run(cli: Cli) -> ExitCode {
                 inputs,
                 output,
                 zarr_format,
-            } => finish(array_math::math(
-                &expression,
-                &inputs,
-                &output,
-                zarr_format,
-                verbose,
-            )),
+                lat_start,
+                lat_step,
+                lon_start,
+                lon_step,
+            } => {
+                let grid = match (lat_start, lat_step, lon_start, lon_step) {
+                    (None, None, None, None) => Ok(None),
+                    (Some(lat_start), Some(lat_step), Some(lon_start), Some(lon_step)) => {
+                        Ok(Some(array_math::GridSpec {
+                            lat_start,
+                            lat_step,
+                            lon_start,
+                            lon_step,
+                        }))
+                    }
+                    _ => Err(Failure::new(
+                        EXIT_USAGE,
+                        "the grid needs all of --lat-start, --lat-step, --lon-start and --lon-step"
+                            .to_string(),
+                    )),
+                };
+                match grid {
+                    Ok(grid) => finish(array_math::math(
+                        &expression,
+                        &inputs,
+                        &output,
+                        zarr_format,
+                        grid,
+                        verbose,
+                    )),
+                    Err(e) => finish(Err(e)),
+                }
+            }
             ArrayCommand::Convert {
                 input,
                 output,

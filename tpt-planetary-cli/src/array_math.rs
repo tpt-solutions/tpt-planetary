@@ -13,12 +13,19 @@
 //! expression := term (('+' | '-') term)*
 //! term       := unary (('*' | '/') unary)*
 //! unary      := '-' unary | primary
-//! primary    := NUMBER | NAME | '(' expression ')'
+//! primary    := NUMBER | NAME | FUNC '(' NAME ')' | '(' expression ')'
 //! NUMBER     := digits, optionally with '.' and digits, optionally with an
 //!               exponent 'e' or 'E', an optional sign and digits
 //! NAME       := letter or '_', then letters, digits or '_'; must be named by
 //!               an --input NAME=PATH argument
+//! FUNC       := anomaly | nino34 | nino34_relative
 //! ```
+//!
+//! The functions take one input array of shape [time, lat, lon] with monthly
+//! steps. `anomaly` is the monthly anomaly and keeps the shape. `nino34` and
+//! `nino34_relative` are the Niño-3.4 indices of `tptplan array index`: they
+//! have shape [time], and need the grid of the input (`--lat-start`,
+//! `--lat-step`, `--lon-start`, `--lon-step`).
 //!
 //! Operators are IEEE: division by zero gives infinities or NaN. Unary minus
 //! binds tighter than `*` and `/`, so `-a * b` means `(-a) * b`.
@@ -31,6 +38,7 @@ use tpt_planetary_array::lazy::{Block, Expr, NodeOp, Region};
 use tpt_planetary_array::meta::{ArrayMetadata, ZarrFormat};
 use tpt_planetary_array::netcdf3::{Format, NcType, Writer};
 use tpt_planetary_array::ops::ArithOp;
+use tpt_planetary_array::ops::climate;
 use tpt_planetary_array::{Array, DType, FillValue, FsStore, Selection, Slice, Store};
 
 use crate::array_cmd::{default_chunks, reject_remote, split_location};
@@ -51,8 +59,71 @@ pub enum Op {
 pub enum Ast {
     Num(f64),
     Name(String),
+    /// A function applied to a named input.
+    Call(Func, String),
     Neg(Box<Ast>),
     Bin(Op, Box<Ast>, Box<Ast>),
+}
+
+/// A function of the expression language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Func {
+    /// Monthly anomaly of a [time, lat, lon] field.
+    Anomaly,
+    /// The Niño-3.4 index (shape [time]).
+    Nino34,
+    /// The relative Niño-3.4 index (shape [time]).
+    Nino34Relative,
+}
+
+impl Func {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "anomaly" => Some(Self::Anomaly),
+            "nino34" => Some(Self::Nino34),
+            "nino34_relative" => Some(Self::Nino34Relative),
+            _ => None,
+        }
+    }
+
+    /// True for the functions that need the input grid.
+    fn needs_grid(self) -> bool {
+        !matches!(self, Self::Anomaly)
+    }
+}
+
+/// The grid of the latitude and longitude axes of the inputs: regular and
+/// ascending, in degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridSpec {
+    pub lat_start: f64,
+    pub lat_step: f64,
+    pub lon_start: f64,
+    pub lon_step: f64,
+}
+
+impl GridSpec {
+    /// Checks that the starts are finite and the steps positive.
+    pub fn validate(&self) -> Result<(), Failure> {
+        if !(self.lat_start.is_finite() && self.lon_start.is_finite()) {
+            return Err(Failure::new(
+                EXIT_USAGE,
+                "grid starts must be finite numbers".to_string(),
+            ));
+        }
+        let positive = |v: f64| v > 0.0 && v.is_finite();
+        if !(positive(self.lat_step) && positive(self.lon_step)) {
+            return Err(Failure::new(
+                EXIT_USAGE,
+                "grid steps must be positive: the coordinates must be ascending".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn coords(start: f64, step: f64, n: u64) -> Vec<f64> {
+        (0..n).map(|i| start + step * i as f64).collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,7 +310,43 @@ impl Parser {
             }
             Some(Token::Name(n)) => {
                 self.pos += 1;
-                Ok(Ast::Name(n))
+                if !matches!(self.peek(), Some(Token::LParen)) {
+                    return Ok(Ast::Name(n));
+                }
+                let func = Func::parse(&n).ok_or_else(|| {
+                    syntax(
+                        column,
+                        format!(
+                            "'{n}' is not a function; the functions are anomaly, nino34 and nino34_relative"
+                        ),
+                    )
+                })?;
+                self.pos += 1;
+                let arg = match self.peek().cloned() {
+                    Some(Token::Name(a)) => {
+                        self.pos += 1;
+                        a
+                    }
+                    other => {
+                        return Err(syntax(
+                            self.here(),
+                            format!(
+                                "expected an input name but found {}",
+                                Self::describe(other.as_ref())
+                            ),
+                        ));
+                    }
+                };
+                match self.peek() {
+                    Some(Token::RParen) => {
+                        self.pos += 1;
+                        Ok(Ast::Call(func, arg))
+                    }
+                    other => Err(syntax(
+                        self.here(),
+                        format!("expected ')' but found {}", Self::describe(other)),
+                    )),
+                }
             }
             Some(Token::LParen) => {
                 self.pos += 1;
@@ -297,6 +404,11 @@ fn names(ast: &Ast, out: &mut Vec<String>) {
         Ast::Name(n) => {
             if !out.contains(n) {
                 out.push(n.clone());
+            }
+        }
+        Ast::Call(_, arg) => {
+            if !out.contains(arg) {
+                out.push(arg.clone());
             }
         }
         Ast::Neg(inner) => names(inner, out),
@@ -399,8 +511,48 @@ fn combine(op: Op, lhs: Value, rhs: Value) -> Result<Value, Failure> {
     })
 }
 
-fn evaluate(ast: &Ast, inputs: &BTreeMap<String, Expr>) -> Result<Value, Failure> {
+fn evaluate(
+    ast: &Ast,
+    inputs: &BTreeMap<String, Expr>,
+    grid: Option<&GridSpec>,
+) -> Result<Value, Failure> {
     Ok(match ast {
+        Ast::Call(func, arg) => {
+            let field = inputs
+                .get(arg)
+                .ok_or_else(|| runtime(format!("no input named '{arg}'")))?;
+            if func.needs_grid() && grid.is_none() {
+                return Err(Failure::new(
+                    EXIT_USAGE,
+                    format!(
+                        "{func:?} needs the grid of '{arg}': pass --lat-start, --lat-step, --lon-start and --lon-step"
+                    ),
+                ));
+            }
+            let expr = match func {
+                Func::Anomaly => {
+                    climate::monthly_anomaly(field).map_err(|e| runtime(format!("anomaly: {e}")))?
+                }
+                Func::Nino34 | Func::Nino34Relative => {
+                    let grid = grid.expect("checked above");
+                    let shape = field.shape();
+                    if shape.len() != 3 {
+                        return Err(runtime(format!(
+                            "'{arg}' must have shape [time, lat, lon] for an index"
+                        )));
+                    }
+                    let lat = GridSpec::coords(grid.lat_start, grid.lat_step, shape[1]);
+                    let lon = GridSpec::coords(grid.lon_start, grid.lon_step, shape[2]);
+                    let built = if *func == Func::Nino34 {
+                        climate::nino34_expr(field, &lat, &lon)
+                    } else {
+                        climate::nino34_relative_expr(field, &lat, &lon)
+                    };
+                    built.map_err(|e| runtime(format!("{func:?}: {e}")))?
+                }
+            };
+            Value::Array(expr)
+        }
         Ast::Num(v) => Value::Scalar(*v),
         Ast::Name(n) => match inputs.get(n) {
             Some(e) => Value::Array(e.clone()),
@@ -410,11 +562,11 @@ fn evaluate(ast: &Ast, inputs: &BTreeMap<String, Expr>) -> Result<Value, Failure
                 )));
             }
         },
-        Ast::Neg(inner) => match evaluate(inner, inputs)? {
+        Ast::Neg(inner) => match evaluate(inner, inputs, grid)? {
             Value::Scalar(v) => Value::Scalar(-v),
             Value::Array(e) => Value::Array(e.mul_scalar(-1.0)),
         },
-        Ast::Bin(op, a, b) => combine(*op, evaluate(a, inputs)?, evaluate(b, inputs)?)?,
+        Ast::Bin(op, a, b) => combine(*op, evaluate(a, inputs, grid)?, evaluate(b, inputs, grid)?)?,
     })
 }
 
@@ -574,6 +726,7 @@ pub fn math(
     inputs: &[String],
     output: &str,
     version: u8,
+    grid: Option<GridSpec>,
     verbose: u8,
 ) -> Result<String, Failure> {
     let ast = parse(expression).map_err(|e| {
@@ -597,7 +750,10 @@ pub fn math(
             "output '{output}' already exists; remove it or choose another path"
         )));
     }
-    let result = match evaluate(&ast, &opened)? {
+    if let Some(g) = &grid {
+        g.validate()?;
+    }
+    let result = match evaluate(&ast, &opened, grid.as_ref())? {
         Value::Scalar(_) => {
             return Err(Failure::new(
                 EXIT_USAGE,
