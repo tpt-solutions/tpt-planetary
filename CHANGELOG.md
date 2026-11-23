@@ -105,6 +105,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - UT1 in `tptplan astro convert` (`--eop FILE`, an IERS finals2000A file), checked
   against astropy's IERS-B values; interpolation across a gap of more than a day is
   an error.
+- `TransformContext::from_utc_and_eop`: TT, UT1 and polar motion for a UTC epoch from
+  the leap-second table and an EOP table.
 - IERS C04 time series (`eopc04`) read by `parse_c04`, and `parse_eop_text` picks
   C04 or finals2000A from the file header; `tptplan astro convert --eop` accepts both.
   Checked on a 2017 excerpt against the finals2000A rows for the same dates.
