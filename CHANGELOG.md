@@ -109,6 +109,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `tptplan ephemeris query --apparent`): light deflection by the Sun and annual
   aberration on the astrometric direction. Checked against Horizons apparent
   positions at five epochs (0.11 arcsec maximum).
+- `tptplan array math` climate functions: `anomaly`, `nino34` and `nino34_relative` over a
+  [time, lat, lon] input, as lazy expressions written chunk by chunk.
 - `tptplan array index` for the Niño-3.4 indices of a local Zarr field.
 - Python `nino34` and `nino34_relative` on a `ZarrArray`, computed lazily with
   the GIL released and checked against a NumPy computation.
