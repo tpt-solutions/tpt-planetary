@@ -3,4 +3,7 @@
 # The toolchain pin matches the MSRV.
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
+# The no_std CI job builds core for this target. Listing it here means the pinned
+# toolchain installs it, rather than only the `stable` toolchain the CI action sets up.
+targets = ["thumbv7em-none-eabihf"]
 profile = "minimal"
