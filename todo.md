@@ -202,7 +202,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] Projections: SIN (orthographic/slant)
 - [x] Projections: AIT (Hammer-Aitoff)
 - [x] Native <-> celestial spherical rotation (LONPOLE/LATPOLE)
-- [ ] Round-trip pixel->sky->pixel accuracy tests vs wcslib/astropy reference values — DONE: pixel->sky and sky->pixel are compared with astropy's wcslib for TAN, SIN, AIT, ARC, ZEA, STG, CAR, MOL, HPX, rotated and LONPOLE/LATPOLE cases, and TAN-SIP (`tests/validation/test_wcs.py`, `test_wcs_projections.py`); the round trips are synthetic on top of that
+- [x] Round-trip pixel->sky->pixel accuracy tests vs wcslib/astropy reference values — DONE: pixel->sky and sky->pixel are compared with astropy's wcslib for TAN, SIN, AIT, ARC, ZEA, STG, CAR, MOL, HPX, rotated and LONPOLE/LATPOLE cases, and TAN-SIP (`tests/validation/test_wcs.py`, `test_wcs_projections.py`); the round trips are synthetic on top of that
 - [x] SIP distortion (decide scope; may defer to Phase 5) — DECIDED and implemented: forward SIP (A, B) is applied, and the world-to-pixel inverse uses AP/BP when present or Newton iteration otherwise (`wcs.rs`). TPV is not implemented.
 
 ### Climate indices
