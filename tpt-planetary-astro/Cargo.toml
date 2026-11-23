@@ -8,9 +8,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords = ["astronomy", "ephemeris", "wcs", "coordinates", "time-scales"]
-categories = ["science", "astronomy"]
+categories = ["science", "date-and-time"]
 
 [dependencies]
 tpt-planetary-core = { workspace = true, features = ["alloc"] }

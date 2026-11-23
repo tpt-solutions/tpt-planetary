@@ -8,8 +8,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
-keywords = ["astronomy", "time", "no_std", "spherical", "coordinates"]
+readme = "README.md"
+keywords = ["astronomy", "time-scales", "geodesy", "spherical", "no-std"]
 categories = ["science", "no-std", "mathematics"]
 
 [features]
