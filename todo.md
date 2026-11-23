@@ -153,7 +153,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
   - [x] Frame bias matrix (Eqs. 5.17, 5.21, 5.33): matches `erfa.bp00` to 7e-13
   - [x] EO complementary terms (Table 5.2e, `cio::eo_complementary_terms`): match `erfa.eect00` to 4e-11 uas; wired into `equation_of_equinoxes` and GAST
   - [x] Generated tables with pinned checksums and row-count checks (`tools/gen_cio_table.py`)
-- [ ] Local Horizontal (Alt/Az) with optional atmospheric refraction — PARTIAL: `frames::icrs_to_altaz_at` (ICRS to geodetic Alt/Az via the CIO chain) with no refraction, validated against `erfa.apco` without annual aberration (max 0.37 arcsec) and against Astropy after removing the annual aberration (max 0.36 arcsec); see docs/validation.md. Refraction is in `frames::icrs_to_altaz_refracted_at` with the ERFA `refco` constants (`refraction_coefficients`, matching `erfa.refco` to 1e-15 relative), and its zenith distance matches `erfa.atco13` to 0.003 arcsec up to 75 degrees. Not yet done: the refracted Alt/Az is not validated end to end against Astropy, and the CLI and Python bindings do not expose it.
+- [ ] Local Horizontal (Alt/Az) with optional atmospheric refraction — PARTIAL: `frames::icrs_to_altaz_at` (ICRS to geodetic Alt/Az via the CIO chain) with no refraction, validated against `erfa.apco` without annual aberration (max 0.37 arcsec) and against Astropy after removing the annual aberration (max 0.36 arcsec); see docs/validation.md. Refraction is in `frames::icrs_to_altaz_refracted_at` with the ERFA `refco` constants (`refraction_coefficients`, matching `erfa.refco` to 1e-15 relative), and its zenith distance matches `erfa.atco13` to 0.003 arcsec up to 75 degrees. The refracted Alt/Az is validated end to end against Astropy AltAz with pressure, temperature, humidity and wavelength set (`tests/validation/test_altaz_refraction.py`, shift agreement 0.072 arcsec). Not yet done: the CLI and Python bindings do not expose the refracted Alt/Az.
 - [x] FK5 / FK4 legacy frames (decide scope) — DECIDED (ADR-004): out of scope for 0.1; ICRS is the base frame.
 - [ ] Accuracy tests (target: sub-milliarcsecond vs SOFA vectors) — PARTIAL: no SOFA vectors; the ERFA-based checks in docs/validation.md give sub-mas agreement for ERA, GMST and obliquity only
 
@@ -202,7 +202,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 - [x] Projections: SIN (orthographic/slant)
 - [x] Projections: AIT (Hammer-Aitoff)
 - [x] Native <-> celestial spherical rotation (LONPOLE/LATPOLE)
-- [ ] Round-trip pixel->sky->pixel accuracy tests vs wcslib/astropy reference values — PARTIAL: synthetic round trips only; no wcslib comparison
+- [ ] Round-trip pixel->sky->pixel accuracy tests vs wcslib/astropy reference values — DONE: pixel->sky and sky->pixel are compared with astropy's wcslib for TAN, SIN, AIT, ARC, ZEA, STG, CAR, MOL, HPX, rotated and LONPOLE/LATPOLE cases, and TAN-SIP (`tests/validation/test_wcs.py`, `test_wcs_projections.py`); the round trips are synthetic on top of that
 - [x] SIP distortion (decide scope; may defer to Phase 5) — DECIDED and implemented: forward SIP (A, B) is applied, and the world-to-pixel inverse uses AP/BP when present or Newton iteration otherwise (`wcs.rs`). TPV is not implemented.
 
 ### Climate indices
