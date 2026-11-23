@@ -819,9 +819,10 @@ pub struct Sgp4 {
 impl Sgp4 {
     /// Initialises the propagator from a parsed TLE with WGS-72 constants.
     ///
-    /// Returns [`OrbitError::DeepSpace`] if the orbital period is 225 minutes or
-    /// more, and [`OrbitError::MeanMotionNonPositive`] for a zero or negative
-    /// mean motion. Eccentricity, semi-latus rectum and decay are checked when
+    /// Orbits with a period of 225 minutes or more are initialised with the
+    /// SDP4 deep-space terms rather than rejected. Returns
+    /// [`OrbitError::MeanMotionNonPositive`] for a zero or negative mean
+    /// motion. Eccentricity, semi-latus rectum and decay are checked when
     /// propagating, as in the reference code.
     pub fn from_tle(tle: &Tle) -> Result<Self, OrbitError> {
         let radius = WGS72_RADIUS_EARTH_KM;

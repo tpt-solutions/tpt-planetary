@@ -5,7 +5,7 @@
 //! fractional-day precision that a single `f64` Julian date would lose.
 //!
 //! The TDB - TT model is the full geocentric Fairhead & Bretagnon (1990)
-//! series, 787 terms as coded in ERFA's `dtdb` (see [`crate::tdb_data`]), plus
+//! series, 787 terms as coded in ERFA's `dtdb` (the table lives in the private `tdb_data` module), plus
 //! the JPL-mass adjustment terms that ERFA adds. The topocentric terms of
 //! `dtdb` depend on the observer's position and are not included, so the
 //! result is the geocentre value.
