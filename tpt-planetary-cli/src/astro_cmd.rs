@@ -8,7 +8,10 @@
 //! degrees. Other frames and time scales are reported as not implemented (exit 3).
 
 use tpt_planetary_astro::eop::{EopError, EopTable, parse_eop_text};
-use tpt_planetary_astro::frames::{Galactic, Icrs, MeanEcliptic, SkyCoord};
+use tpt_planetary_astro::frames::{
+    Atmosphere, Galactic, GeodeticObserver, Icrs, MeanEcliptic, SkyCoord, TransformContext,
+    icrs_to_altaz_refracted_at,
+};
 use tpt_planetary_astro::nutation::{
     TrueEclipticOfDate, icrs_to_true_ecliptic_of_date, true_ecliptic_of_date_to_icrs,
 };
@@ -491,6 +494,84 @@ fn convert_ut1(
 /// Modified Julian Date of a two-part Julian date.
 fn mjd_of(j: JulianDate) -> f64 {
     (j.day() - 2_400_000.5) + j.fraction()
+}
+
+/// Parses an observer given as `LON,LAT,HEIGHT`: WGS84 longitude (east, degrees),
+/// geodetic latitude (degrees) and height (metres).
+fn parse_observer(text: &str) -> Result<(f64, f64, f64), Failure> {
+    let usage = |msg: &str| Failure::new(EXIT_USAGE, format!("--observer: {msg}"));
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    if parts.len() != 3 {
+        return Err(usage("expected LON,LAT,HEIGHT"));
+    }
+    let mut values = [0.0f64; 3];
+    for (slot, part) in values.iter_mut().zip(&parts) {
+        *slot = part
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| usage(&format!("'{part}' is not a number")))?;
+    }
+    if !(-90.0..=90.0).contains(&values[1]) {
+        return Err(usage("latitude must be between -90 and 90 degrees"));
+    }
+    Ok((values[0], values[1], values[2]))
+}
+
+/// Alt/Az of an ICRS direction for a geodetic observer at a UTC epoch.
+///
+/// UT1 - UTC and the polar motion come from the EOP file given by `eop`
+/// (`TransformContext::from_utc_and_eop`); no aberration or parallax is applied.
+/// With a positive pressure the refraction model of ERFA is applied; zero pressure
+/// gives the geometric position.
+pub fn altaz_command(
+    ra_deg: f64,
+    dec_deg: f64,
+    observer: &str,
+    epoch: &str,
+    eop: &Path,
+    atmosphere: Atmosphere,
+    format: OutputFormat,
+) -> Result<String, Failure> {
+    if !(ra_deg.is_finite() && dec_deg.is_finite() && (-90.0..=90.0).contains(&dec_deg)) {
+        return Err(Failure::new(
+            EXIT_USAGE,
+            "the direction needs a finite RA and a Dec between -90 and 90 degrees".to_string(),
+        ));
+    }
+    let (lon, lat, height) = parse_observer(observer)?;
+    let ct = parse_timestamp(epoch)
+        .map_err(|e| Failure::new(EXIT_USAGE, format!("invalid epoch '{epoch}': {e}")))?;
+    let utc =
+        Epoch::<Utc>::from_civil(ct, &EMBEDDED).map_err(|e| core_failure("invalid epoch", e))?;
+    let text = std::fs::read_to_string(eop).map_err(|e| {
+        Failure::new(
+            EXIT_RUNTIME,
+            format!("cannot read EOP file '{}': {e}", eop.display()),
+        )
+    })?;
+    let records = parse_eop_text(&text).map_err(|e| {
+        Failure::new(
+            EXIT_RUNTIME,
+            format!("cannot parse EOP file '{}': {e}", eop.display()),
+        )
+    })?;
+    let table = EopTable::new(&records)
+        .map_err(|e| Failure::new(EXIT_RUNTIME, format!("bad EOP table: {e}")))?;
+    let ctx = TransformContext::from_utc_and_eop(utc, &table, &EMBEDDED)
+        .map_err(|e| Failure::new(EXIT_RUNTIME, e.to_string()))?;
+
+    let star = SkyCoord::<Icrs>::from_degrees(ra_deg, dec_deg);
+    let site = GeodeticObserver::from_degrees(lon, lat, height);
+    let altaz = icrs_to_altaz_refracted_at(star, site, &ctx, atmosphere);
+    let (az, alt) = (altaz.lon_deg(), altaz.lat_deg());
+    Ok(match format {
+        OutputFormat::Table => format!("azimuth {az} deg, altitude {alt} deg"),
+        OutputFormat::Json => json::object(&[
+            ("azimuth_deg", az.to_string()),
+            ("altitude_deg", alt.to_string()),
+        ]),
+    })
 }
 
 #[cfg(test)]

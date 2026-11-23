@@ -231,6 +231,37 @@ pub enum AstroCommand {
         #[arg(long, value_name = "PATH")]
         eop: Option<std::path::PathBuf>,
     },
+    /// Altitude and azimuth of an ICRS direction for a geodetic observer.
+    Altaz {
+        /// Right ascension, ICRS, degrees.
+        #[arg(allow_hyphen_values = true)]
+        ra: f64,
+        /// Declination, ICRS, degrees.
+        #[arg(allow_hyphen_values = true)]
+        dec: f64,
+        /// Observer as `LON,LAT,HEIGHT`: WGS84 longitude (east, degrees), latitude
+        /// (degrees) and height (metres).
+        #[arg(long, value_name = "LON,LAT,HEIGHT", allow_hyphen_values = true)]
+        observer: String,
+        /// UTC epoch (ISO 8601).
+        #[arg(long)]
+        epoch: String,
+        /// IERS finals2000A or C04 file, for UT1 - UTC and the polar motion.
+        #[arg(long, value_name = "PATH")]
+        eop: std::path::PathBuf,
+        /// Atmospheric pressure in hPa. Zero (the default) gives the geometric position.
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        pressure: f64,
+        /// Air temperature in degrees Celsius, for refraction.
+        #[arg(long, default_value_t = 15.0, allow_hyphen_values = true)]
+        temperature: f64,
+        /// Relative humidity from 0 to 1, for refraction.
+        #[arg(long, default_value_t = 0.5, allow_hyphen_values = true)]
+        humidity: f64,
+        /// Observing wavelength in micrometres, for refraction.
+        #[arg(long, default_value_t = 0.55, allow_hyphen_values = true)]
+        wavelength: f64,
+    },
 }
 
 /// `tptplan ephemeris` subcommands.
@@ -396,6 +427,30 @@ fn run(cli: Cli) -> ExitCode {
                 &to,
                 epoch.as_deref(),
                 eop.as_deref(),
+                format,
+            )),
+            AstroCommand::Altaz {
+                ra,
+                dec,
+                observer,
+                epoch,
+                eop,
+                pressure,
+                temperature,
+                humidity,
+                wavelength,
+            } => finish(astro_cmd::altaz_command(
+                ra,
+                dec,
+                &observer,
+                &epoch,
+                &eop,
+                tpt_planetary_astro::frames::Atmosphere {
+                    pressure_hpa: pressure,
+                    temperature_c: temperature,
+                    relative_humidity: humidity,
+                    wavelength_um: wavelength,
+                },
                 format,
             )),
         },
