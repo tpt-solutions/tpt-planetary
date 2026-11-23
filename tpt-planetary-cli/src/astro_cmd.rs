@@ -18,7 +18,9 @@ use tpt_planetary_astro::nutation::{
 use tpt_planetary_astro::precession::{
     MeanEclipticOfDate, icrs_to_mean_ecliptic_of_date, mean_ecliptic_of_date_to_icrs,
 };
-use tpt_planetary_astro::time::{tdb_to_tt, tt_to_tdb};
+use tpt_planetary_astro::time::{
+    tcb_to_tdb, tcg_to_tt, tdb_to_tcb, tdb_to_tt, tt_to_tcg, tt_to_tdb,
+};
 use tpt_planetary_core::Error as CoreError;
 use tpt_planetary_core::jd::JulianDate;
 use tpt_planetary_core::leap::EMBEDDED;
@@ -184,7 +186,7 @@ fn frame_convert(
 
 /// Names of scales and frames that are known but not implemented yet.
 const UNIMPLEMENTED: &[&str] = &[
-    "tcb", "tcg", "icrs", "fk5", "fk4", "galactic", "ecliptic", "gcrs", "itrs", "altaz",
+    "icrs", "fk5", "fk4", "galactic", "ecliptic", "gcrs", "itrs", "altaz",
 ];
 
 /// A time scale supported by this command.
@@ -198,6 +200,10 @@ pub enum Scale {
     Tt,
     /// Barycentric Dynamical Time.
     Tdb,
+    /// Geocentric Coordinate Time.
+    Tcg,
+    /// Barycentric Coordinate Time.
+    Tcb,
     /// Universal Time, UT1 (needs an IERS EOP file for UT1 - UTC).
     Ut1,
 }
@@ -209,6 +215,8 @@ impl Scale {
             Scale::Tai => "tai",
             Scale::Tt => "tt",
             Scale::Tdb => "tdb",
+            Scale::Tcg => "tcg",
+            Scale::Tcb => "tcb",
             Scale::Ut1 => "ut1",
         }
     }
@@ -222,6 +230,8 @@ pub fn parse_scale(name: &str) -> Result<Scale, Failure> {
         "tai" => Ok(Scale::Tai),
         "tt" => Ok(Scale::Tt),
         "tdb" => Ok(Scale::Tdb),
+        "tcg" => Ok(Scale::Tcg),
+        "tcb" => Ok(Scale::Tcb),
         "ut1" => Ok(Scale::Ut1),
         other if UNIMPLEMENTED.contains(&other) => Err(Failure::new(
             EXIT_NOT_IMPLEMENTED,
@@ -245,6 +255,10 @@ enum AnyEpoch {
     Tt(Epoch<Tt>),
     /// TDB, held as a Julian date (the core crate has no TDB scale type).
     Tdb(JulianDate),
+    /// TCG, held as a Julian date.
+    Tcg(JulianDate),
+    /// TCB, held as a Julian date.
+    Tcb(JulianDate),
 }
 
 impl AnyEpoch {
@@ -253,7 +267,7 @@ impl AnyEpoch {
             AnyEpoch::Utc(e) => e.jd(),
             AnyEpoch::Tai(e) => e.jd(),
             AnyEpoch::Tt(e) => e.jd(),
-            AnyEpoch::Tdb(j) => j,
+            AnyEpoch::Tdb(j) | AnyEpoch::Tcg(j) | AnyEpoch::Tcb(j) => j,
         }
     }
 
@@ -262,7 +276,9 @@ impl AnyEpoch {
             AnyEpoch::Utc(e) => e.to_civil(&EMBEDDED),
             AnyEpoch::Tai(e) => e.to_civil(),
             AnyEpoch::Tt(e) => e.to_civil(),
-            AnyEpoch::Tdb(j) => Epoch::<Tt>::from_jd(j).to_civil(),
+            AnyEpoch::Tdb(j) | AnyEpoch::Tcg(j) | AnyEpoch::Tcb(j) => {
+                Epoch::<Tt>::from_jd(j).to_civil()
+            }
         }
     }
 }
@@ -272,7 +288,7 @@ fn to_tai(e: AnyEpoch) -> Result<Epoch<Tai>, CoreError> {
         AnyEpoch::Utc(u) => u.to_scale(&EMBEDDED),
         AnyEpoch::Tai(t) => Ok(t),
         AnyEpoch::Tt(t) => t.to_scale(&EMBEDDED),
-        AnyEpoch::Tdb(_) => to_tt(e)?.to_scale(&EMBEDDED),
+        AnyEpoch::Tdb(_) | AnyEpoch::Tcg(_) | AnyEpoch::Tcb(_) => to_tt(e)?.to_scale(&EMBEDDED),
     }
 }
 
@@ -285,12 +301,37 @@ fn to_tt(e: AnyEpoch) -> Result<Epoch<Tt>, CoreError> {
             let (hi, lo) = tdb_to_tt(j.day(), j.fraction());
             Ok(Epoch::from_jd(JulianDate::new(hi, lo)))
         }
+        AnyEpoch::Tcg(j) => {
+            let (hi, lo) = tcg_to_tt(j.day(), j.fraction());
+            Ok(Epoch::from_jd(JulianDate::new(hi, lo)))
+        }
+        AnyEpoch::Tcb(j) => {
+            let (hi, lo) = tcb_to_tdb(j.day(), j.fraction());
+            let (hi, lo) = tdb_to_tt(hi, lo);
+            Ok(Epoch::from_jd(JulianDate::new(hi, lo)))
+        }
     }
+}
+
+fn to_tcg(e: AnyEpoch) -> Result<JulianDate, CoreError> {
+    let tt = to_tt(e)?.jd();
+    let (hi, lo) = tt_to_tcg(tt.day(), tt.fraction());
+    Ok(JulianDate::new(hi, lo))
+}
+
+fn to_tcb(e: AnyEpoch) -> Result<JulianDate, CoreError> {
+    let tdb = to_tdb(e)?;
+    let (hi, lo) = tdb_to_tcb(tdb.day(), tdb.fraction());
+    Ok(JulianDate::new(hi, lo))
 }
 
 fn to_tdb(e: AnyEpoch) -> Result<JulianDate, CoreError> {
     match e {
         AnyEpoch::Tdb(j) => Ok(j),
+        AnyEpoch::Tcb(j) => {
+            let (hi, lo) = tcb_to_tdb(j.day(), j.fraction());
+            Ok(JulianDate::new(hi, lo))
+        }
         other => {
             let tt = to_tt(other)?.jd();
             let (hi, lo) = tt_to_tdb(tt.day(), tt.fraction());
@@ -304,7 +345,7 @@ fn to_utc(e: AnyEpoch) -> Result<Epoch<Utc>, CoreError> {
         AnyEpoch::Utc(u) => Ok(u),
         AnyEpoch::Tai(t) => t.to_scale(&EMBEDDED),
         AnyEpoch::Tt(t) => t.to_scale(&EMBEDDED),
-        AnyEpoch::Tdb(_) => to_tt(e)?.to_scale(&EMBEDDED),
+        AnyEpoch::Tdb(_) | AnyEpoch::Tcg(_) | AnyEpoch::Tcb(_) => to_tt(e)?.to_scale(&EMBEDDED),
     }
 }
 
@@ -314,6 +355,8 @@ fn convert(e: AnyEpoch, to: Scale) -> Result<AnyEpoch, CoreError> {
         Scale::Tai => AnyEpoch::Tai(to_tai(e)?),
         Scale::Tt => AnyEpoch::Tt(to_tt(e)?),
         Scale::Tdb => AnyEpoch::Tdb(to_tdb(e)?),
+        Scale::Tcg => AnyEpoch::Tcg(to_tcg(e)?),
+        Scale::Tcb => AnyEpoch::Tcb(to_tcb(e)?),
         Scale::Ut1 => unreachable!("UT1 conversions are routed through convert_ut1"),
     })
 }
@@ -377,6 +420,8 @@ pub fn convert_command_at(
         Scale::Tt => Epoch::<Tt>::from_civil(ct).map(AnyEpoch::Tt),
         // The calendar reading of a TDB timestamp is the same Julian date.
         Scale::Tdb => Epoch::<Tt>::from_civil(ct).map(|t| AnyEpoch::Tdb(t.jd())),
+        Scale::Tcg => Epoch::<Tt>::from_civil(ct).map(|t| AnyEpoch::Tcg(t.jd())),
+        Scale::Tcb => Epoch::<Tt>::from_civil(ct).map(|t| AnyEpoch::Tcb(t.jd())),
         Scale::Ut1 => unreachable!("UT1 inputs are routed through convert_ut1"),
     }
     .map_err(|e| core_failure("invalid timestamp", e))?;
@@ -465,6 +510,16 @@ fn convert_ut1(
                         .map_err(|e| core_failure("invalid timestamp", e))?,
                 ),
                 Scale::Tdb => AnyEpoch::Tdb(
+                    Epoch::<Tt>::from_civil(*ct)
+                        .map_err(|e| core_failure("invalid timestamp", e))?
+                        .jd(),
+                ),
+                Scale::Tcg => AnyEpoch::Tcg(
+                    Epoch::<Tt>::from_civil(*ct)
+                        .map_err(|e| core_failure("invalid timestamp", e))?
+                        .jd(),
+                ),
+                Scale::Tcb => AnyEpoch::Tcb(
                     Epoch::<Tt>::from_civil(*ct)
                         .map_err(|e| core_failure("invalid timestamp", e))?
                         .jd(),
@@ -659,7 +714,8 @@ mod tests {
     fn unimplemented_and_unknown_scales_have_distinct_codes() {
         assert_eq!(parse_scale("icrs").unwrap_err().code, EXIT_NOT_IMPLEMENTED);
         assert_eq!(parse_scale("tdb").unwrap(), Scale::Tdb);
-        assert_eq!(parse_scale("tcb").unwrap_err().code, EXIT_NOT_IMPLEMENTED);
+        assert_eq!(parse_scale("tcb").unwrap(), Scale::Tcb);
+        assert_eq!(parse_scale("fk5").unwrap_err().code, EXIT_NOT_IMPLEMENTED);
         assert_eq!(parse_scale("utx").unwrap_err().code, EXIT_USAGE);
     }
 
