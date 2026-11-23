@@ -14,11 +14,14 @@ at 1950. The aberration is ERFA's eraAb, which includes the relativistic terms,
 and it changed the residual by less than 0.001 arcsec. The remaining RA offset
 of about +0.05 arcsec is reproduced by an independent chain: pyerfa's ld, ab
 and pnm06a applied to the kernel vectors agree with the crate to 1e-4 arcsec.
-So the residual comes from the model, not the code. Light deflection is
-ruled out as its cause: without it the RA residuals are 0.02 to 0.09 arcsec,
-no closer overall, and the offset on Jupiter at 2025 changes sign. The cause
-of the common +0.05 arcsec is not identified; Horizons' own model is not
-visible from outside.
+The residual is not from the code. Checked by measurement: the kernel subset
+(DE440s against the full DE440) gives the same residuals to 1e-4 arcsec; SPICE's
+own apparent chain (LT+S, no light deflection) on the same kernel gives the same
+RA offsets as ours without deflection; the IAU 1976 precession with 1980
+nutation is worse than IAU 2006 (up to 0.12 arcsec). Light deflection changes the
+residual by up to 0.07 arcsec and makes Jupiter in 2025 worse. The cause of the
+common +0.05 arcsec is not identified; it is Horizons' own treatment, which is
+not visible from outside.
 """
 
 from __future__ import annotations
