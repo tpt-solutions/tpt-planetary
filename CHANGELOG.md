@@ -98,6 +98,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   aberration on the astrometric direction. Checked against Horizons apparent
   positions at five epochs (0.11 arcsec maximum).
 - `tptplan array index` for the Niño-3.4 indices of a local Zarr field.
+- Python `nino34` and `nino34_relative` on a `ZarrArray`, computed lazily with
+  the GIL released and checked against a NumPy computation.
 - Apparent directions (`tptplan ephemeris query --apparent`), checked against
   Horizons at five epochs.
 - UT1 in `tptplan astro convert` (`--eop FILE`, an IERS finals2000A file), checked
