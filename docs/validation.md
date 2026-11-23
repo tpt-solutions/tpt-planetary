@@ -313,7 +313,11 @@ arguments. The `tab5.2e` complementary terms are not implemented (see Not valida
   readme column table, not against a data file. The GMST and ERA tests use
   UT1-UTC = 0 as specified.
 - **Ephemerides.** The SPK/DAF reader, Chebyshev evaluation and light time are
-  not validated against JPL. The required kernels are not in this repository.
+  checked against SPICE (`test_ephemeris_spice_sweep.py`, 3000 epochs across the
+  DE440s span, astrometric direction of Jupiter, largest difference 0.0001
+  arcsec) and against JPL Horizons at five epochs (0.11 arcsec). The kernels are
+  not in this repository, and the sweep covers only the sampled epochs of the
+  kernel's own model.
   `earth_sun_distance_km` (SPK) is not compared; only the analytic helper is.- **Other frames.** ICRS -> AltAz is compared only with refraction, aberration, light deflection and parallax excluded (see the Alt/Az section). The observed (refracted) place is not validated. The ITRS to geodetic conversion is not compared.
 - **WCS scope.** Only TAN, SIN and AIT, with LONPOLE and LATPOLE left to their
   defaults. Explicit LONPOLE and LATPOLE values, the PC and CD mix, SIP, TPV,

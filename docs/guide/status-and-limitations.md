@@ -10,11 +10,13 @@ None of the four milestones in `todo.md` is met yet.
 
 - **M1** (Zarr from S3, global mean in seconds): no S3 or HTTP store. Local
   Zarr only.
-- **M2** (Jupiter position to sub-arcsecond accuracy): the ephemeris reader
-  exists, but there is no validation against JPL Horizons, and the CLI query
-  needs a kernel that is not bundled.
-- **M3** (lazy El Nino index): no climate index code. Anomaly, climatology and
-  Nino3.4 are not implemented.
+- **M2** (Jupiter position to sub-arcsecond accuracy): the astrometric direction
+  agrees with JPL Horizons to 0.11 arcsec at five epochs (1950 to 2025) and with
+  SPICE to 0.0001 arcsec at 3000 random epochs across the DE440s span. The SPK
+  kernel is user-supplied and not bundled.
+- **M3** (lazy El Nino index): the Nino3.4 index and its relative form are
+  library, CLI (`tptplan array index`) and Python (`nino34`) functions. The
+  milestone's wording names `tptplan array math`, which is still elementwise only.
 
 ## What is checked
 
