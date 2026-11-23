@@ -14,10 +14,12 @@
 //! - Fixed-format and free-format cards, with `''` escapes in strings and
 //!   Fortran `D` exponents in numbers.
 //!
-//! Not supported, and rejected with an error: writing ASCII tables, variable-length,
-//! bit and complex binary columns, tile or other compression, random groups, and
-//! `CONTINUE` long-string cards. A
-//! `HIERARCH` card is returned as a commentary card and is not interpreted.
+//! Tile-compressed integer images with `RICE_1` are decompressed by
+//! [`Hdu::compressed_values`]. Not supported, and rejected with an error: writing
+//! variable-length, bit and complex binary columns, other tile compression
+//! (`GZIP`, `HCOMPRESS`, `PLIO`) and quantized float tiles, random groups, and
+//! `CONTINUE` long-string cards. A `HIERARCH` card is returned as a commentary card
+//! and is not interpreted.
 //! A final data block that lacks its zero padding is accepted.
 //!
 //! Pixel order follows FITS: axis 1 varies fastest, so the flat index of a
@@ -42,10 +44,13 @@
 //! # Ok::<(), fits::FitsError>(())
 //! ```
 
+mod tile;
+
 use core::fmt;
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Size of a FITS logical block in bytes.
@@ -651,6 +656,157 @@ fn collect_be<T, const N: usize>(data: &[u8], f: impl Fn([u8; N]) -> T) -> Vec<T
     data.chunks_exact(N)
         .filter_map(|c| c.first_chunk::<N>().map(|a| f(*a)))
         .collect()
+}
+
+impl<'a> Hdu<'a> {
+    /// True for a tile-compressed image: a binary table with `ZIMAGE = T`.
+    #[must_use]
+    pub fn is_compressed_image(&self) -> bool {
+        self.table && self.header.get("ZIMAGE") == Some(Value::Logical(true))
+    }
+
+    /// Decompresses a tile-compressed image (`ZCMPTYPE = 'RICE_1'`) into its
+    /// physical values in FITS order, with `BZERO` and `BSCALE` applied.
+    ///
+    /// The tiles come from the `COMPRESSED_DATA` column, one row per tile, in
+    /// the standard order (`ZTILE1` fastest). Partial tiles at the edges are
+    /// clipped to the image. The block size is `ZVAL` of `BLOCKSIZE` (default
+    /// 32), and the byte width of a pixel in the stream is `ZVAL` of `BYTEPIX`
+    /// (default from `ZBITPIX`).
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::InvalidHeader`] if the HDU is not a compressed image or its
+    /// keywords are missing, [`FitsError::Unsupported`] for other compression
+    /// types or for floating-point images, and the errors of the Rice decoder.
+    pub fn compressed_values(&self) -> Result<Vec<f64>> {
+        if !self.is_compressed_image() {
+            return Err(FitsError::InvalidHeader(
+                "the HDU is not a compressed image",
+            ));
+        }
+        let header = self.header;
+        let text = |key: &str| header.get(key).and_then(|v| text_value(v)).map(str::trim);
+        if text("ZCMPTYPE") != Some("RICE_1") {
+            return Err(FitsError::Unsupported("tile compression other than RICE_1"));
+        }
+        let zbitpix = header
+            .get("ZBITPIX")
+            .and_then(|v| v.as_i64())
+            .ok_or(FitsError::InvalidHeader("ZBITPIX missing"))?;
+        let default_bytepix = match zbitpix {
+            8 => 1,
+            16 => 2,
+            32 => 4,
+            _ => {
+                return Err(FitsError::Unsupported(
+                    "compressed images other than integer 8, 16 or 32 bits",
+                ));
+            }
+        };
+        let naxis = header
+            .get("ZNAXIS")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("ZNAXIS missing"))?;
+        let mut dims = Vec::with_capacity(naxis);
+        let mut tiles = Vec::with_capacity(naxis);
+        for n in 1..=naxis {
+            let dim = header
+                .get(&format!("ZNAXIS{n}"))
+                .and_then(|v| v.as_i64())
+                .and_then(|v| usize::try_from(v).ok())
+                .ok_or(FitsError::InvalidHeader("ZNAXISn missing"))?;
+            let tile = header
+                .get(&format!("ZTILE{n}"))
+                .and_then(|v| v.as_i64())
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or(if n == 1 { dim } else { 1 })
+                .max(1);
+            dims.push(dim);
+            tiles.push(tile);
+        }
+        let zval = |name: &str| -> Option<i64> {
+            (1..=8).find_map(|n| {
+                let key_name = header
+                    .get(&format!("ZNAME{n}"))
+                    .and_then(|v| text_value(v))?;
+                if key_name.trim() == name {
+                    header.get(&format!("ZVAL{n}")).and_then(|v| v.as_i64())
+                } else {
+                    None
+                }
+            })
+        };
+        let blocksize = zval("BLOCKSIZE").unwrap_or(32);
+        let bytepix = zval("BYTEPIX").unwrap_or(default_bytepix);
+        let blocksize = usize::try_from(blocksize)
+            .map_err(|_| FitsError::InvalidHeader("BLOCKSIZE is negative"))?;
+        let bytepix = usize::try_from(bytepix)
+            .map_err(|_| FitsError::InvalidHeader("BYTEPIX is negative"))?;
+        let bscale = header.get("BSCALE").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let bzero = header.get("BZERO").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+        let counts: Vec<usize> = dims
+            .iter()
+            .zip(&tiles)
+            .map(|(&d, &t)| d.div_ceil(t))
+            .collect();
+        let tile_total: usize = counts.iter().product();
+        let table = self.table()?;
+        if table.rows() != tile_total {
+            return Err(FitsError::InvalidHeader(
+                "the compressed table has the wrong number of tiles",
+            ));
+        }
+        let descriptors = table.read_vla("COMPRESSED_DATA")?;
+        let pixel_total: usize = dims.iter().product();
+        let mut out = vec![0.0f64; pixel_total];
+
+        // Strides of the image (fastest first) and of the tile grid.
+        let mut stride = Vec::with_capacity(naxis);
+        let mut acc = 1usize;
+        for &d in &dims {
+            stride.push(acc);
+            acc *= d;
+        }
+        let mut stream = Vec::new();
+        for (t, row) in descriptors.iter().enumerate() {
+            // Origin of this tile in the grid, fastest axis first.
+            let mut rest = t;
+            let mut origin = Vec::with_capacity(naxis);
+            let mut extent = Vec::with_capacity(naxis);
+            for k in 0..naxis {
+                let g = rest % counts[k];
+                rest /= counts[k];
+                let start = g * tiles[k];
+                origin.push(start);
+                extent.push(tiles[k].min(dims[k] - start));
+            }
+            let npix: usize = extent.iter().product();
+            stream.clear();
+            stream.extend(row.iter().map(|&v| v as u8));
+            let mut values = vec![0u32; npix];
+            tile::rice_decode(&stream, bytepix, blocksize, &mut values)?;
+            for (p, &raw) in values.iter().enumerate() {
+                // Local coordinates of pixel p within the tile, fastest first.
+                let mut q = p;
+                let mut flat = 0usize;
+                for k in 0..naxis {
+                    let c = q % extent[k];
+                    q /= extent[k];
+                    flat += (origin[k] + c) * stride[k];
+                }
+                let stored = match zbitpix {
+                    8 => f64::from(raw as u8),
+                    16 => f64::from(raw as i16),
+                    _ => f64::from(raw as i32),
+                };
+                out[flat] = bzero + bscale * stored;
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Owned pixel data in its stored native type. See [`Hdu::to_native`].
