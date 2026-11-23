@@ -48,6 +48,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Astro: ICRS <-> Galactic, ERA/GMST, WCS.
     m.add_function(wrap_pyfunction!(astro::icrs_to_galactic, m)?)?;
+    m.add_function(wrap_pyfunction!(astro::icrs_to_altaz, m)?)?;
     m.add_function(wrap_pyfunction!(astro::galactic_to_icrs, m)?)?;
     m.add_function(wrap_pyfunction!(astro::earth_rotation_angle, m)?)?;
     m.add_function(wrap_pyfunction!(astro::gmst_iau2006, m)?)?;

@@ -5,7 +5,10 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyString};
 
-use tpt_planetary_astro::frames::{Galactic, Icrs, SkyCoord};
+use tpt_planetary_astro::frames::{
+    Atmosphere, Galactic, GeodeticObserver, Icrs, SkyCoord, TransformContext,
+    icrs_to_altaz_refracted_at,
+};
 use tpt_planetary_astro::time;
 use tpt_planetary_astro::wcs::Wcs as CoreWcs;
 
@@ -198,4 +201,68 @@ impl Wcs {
                 .unwrap_or((f64::NAN, f64::NAN))
         })
     }
+}
+
+/// Converts ICRS (RA, Dec) in degrees to local Alt/Az for a geodetic observer.
+///
+/// `ra` and `dec` are float64 arrays of equal length. The observer is WGS84
+/// geodetic longitude (east), latitude and height. `tt` and `ut1` are
+/// JulianDate values, and `xp_arcsec`, `yp_arcsec` the polar motion (zero for
+/// none). The result has no aberration or parallax. Refraction is applied when
+/// `pressure_hpa` is positive, with the ERFA refraction model; zero pressure
+/// gives the geometric position.
+///
+/// Returns two float64 arrays `(az, alt)` in degrees, azimuth north through
+/// east in `[0, 360)`.
+#[pyfunction]
+#[pyo3(signature = (
+    ra,
+    dec,
+    lon_deg,
+    lat_deg,
+    height_m,
+    tt,
+    ut1,
+    xp_arcsec = 0.0,
+    yp_arcsec = 0.0,
+    pressure_hpa = 0.0,
+    temperature_c = 15.0,
+    relative_humidity = 0.5,
+    wavelength_um = 0.55
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn icrs_to_altaz<'py>(
+    py: Python<'py>,
+    ra: PyReadonlyArray1<'py, f64>,
+    dec: PyReadonlyArray1<'py, f64>,
+    lon_deg: f64,
+    lat_deg: f64,
+    height_m: f64,
+    tt: PyRef<'py, JulianDate>,
+    ut1: PyRef<'py, JulianDate>,
+    xp_arcsec: f64,
+    yp_arcsec: f64,
+    pressure_hpa: f64,
+    temperature_c: f64,
+    relative_humidity: f64,
+    wavelength_um: f64,
+) -> PyResult<ArrayPair<'py>> {
+    let ctx = TransformContext::new(
+        (tt.inner.day(), tt.inner.fraction()),
+        (ut1.inner.day(), ut1.inner.fraction()),
+        xp_arcsec,
+        yp_arcsec,
+    );
+    let observer = GeodeticObserver::from_degrees(lon_deg, lat_deg, height_m);
+    let atmosphere = Atmosphere {
+        pressure_hpa,
+        temperature_c,
+        relative_humidity,
+        wavelength_um,
+    };
+    map_pairs(py, &ra, &dec, |ra, dec| {
+        let star = SkyCoord::<Icrs>::from_degrees(ra, dec);
+        let a = icrs_to_altaz_refracted_at(star, observer, &ctx, atmosphere);
+        (a.lon_deg(), a.lat_deg())
+    })
 }

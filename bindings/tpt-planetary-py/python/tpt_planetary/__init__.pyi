@@ -101,6 +101,28 @@ def icrs_to_galactic(ra: Float64Array, dec: Float64Array) -> tuple[Float64Array,
 def galactic_to_icrs(l: Float64Array, b: Float64Array) -> tuple[Float64Array, Float64Array]:  # noqa: E741
     """Galactic ``(l, b)`` in degrees to ICRS ``(ra, dec)`` in degrees."""
     ...
+def icrs_to_altaz(
+    ra: Float64Array,
+    dec: Float64Array,
+    lon_deg: float,
+    lat_deg: float,
+    height_m: float,
+    tt: JulianDate,
+    ut1: JulianDate,
+    xp_arcsec: float = 0.0,
+    yp_arcsec: float = 0.0,
+    pressure_hpa: float = 0.0,
+    temperature_c: float = 15.0,
+    relative_humidity: float = 0.5,
+    wavelength_um: float = 0.55,
+) -> tuple[Float64Array, Float64Array]:
+    """Local Alt/Az of ICRS directions for a WGS84 geodetic observer.
+
+    Returns ``(az, alt)`` in degrees. There is no aberration or parallax. The
+    ERFA refraction model is applied when ``pressure_hpa`` is positive.
+    """
+    ...
+
 def earth_rotation_angle(ut1: JulianDate) -> float:
     """Earth Rotation Angle in radians for a UT1 Julian Date."""
     ...
