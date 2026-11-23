@@ -178,7 +178,7 @@ Legend: `- [ ]` open · `- [x]` done · **M** = milestone
 
 ### Map algebra (tpt-simd)
 - [x] Integrate `tpt-simd` into `tpt-planetary-array` — via the optional `simd` feature (tpt-simd-vector, not the umbrella crate); no measured speedup on this machine
-- [ ] Vectorised elementwise ops (+, -, *, /, pow, abs, sqrt, exp, log, trig) — PARTIAL: add, sub, mul, div, abs and sqrt are vectorised under the simd feature; pow, exp, log, trig and comparisons are scalar only
+- [x] Vectorised elementwise ops (+, -, *, /, pow, abs, sqrt, exp, log, trig) — DONE with a decision: add, sub, mul, div, abs, sqrt and the comparisons (<, <=, >, >=, ==, !=) are vectorised under the `simd` feature, and each is checked bit for bit against the scalar operation, including NaN and signed zero (`ops::simd`, `compare_tests`). exp, log, sin, cos and pow stay scalar: `tpt-simd-vector` has no transcendental kernels, and a lane-wise polynomial would not match libm bit for bit, which the module promises. Revisit if a vector libm is added.
 - [x] Vectorised comparisons, masks, `where`/select
 - [ ] SIMD reductions (sum, mean, min, max, std) with scalar fallbacks — PARTIAL: full-array sum, mean, min and max are vectorised under the simd feature; per-axis reductions are scalar
 - [x] Broadcasting rules (N-D)

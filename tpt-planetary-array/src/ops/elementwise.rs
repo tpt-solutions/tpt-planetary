@@ -61,7 +61,7 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
-    fn apply(self, a: f64, b: f64) -> f64 {
+    pub(crate) fn apply(self, a: f64, b: f64) -> f64 {
         let holds = match self {
             CmpOp::Lt => a < b,
             CmpOp::Le => a <= b,
@@ -138,22 +138,6 @@ fn operand_block(expr: &Expr, region: &Region, out_shape: &[u64]) -> Result<Bloc
 
 /// Combines two operand blocks pointwise. Output is valid only where both
 /// inputs are valid.
-fn zip_blocks(a: &Block, b: &Block, f: impl Fn(f64, f64) -> f64) -> Block {
-    let values = a
-        .values
-        .iter()
-        .zip(&b.values)
-        .map(|(&x, &y)| f(x, y))
-        .collect();
-    let valid = a
-        .valid
-        .iter()
-        .zip(&b.valid)
-        .map(|(&p, &q)| p && q)
-        .collect();
-    Block { values, valid }
-}
-
 #[derive(Debug)]
 struct Arith {
     lhs: Expr,
@@ -182,6 +166,19 @@ impl NodeOp for Arith {
             .collect();
         Ok(Block { values, valid })
     }
+}
+
+/// Applies the comparison `op` pointwise, giving 1.0 where it holds and 0.0
+/// elsewhere (NaN compares false). With the `simd` feature the vector kernel is
+/// used where the operator has one.
+fn compare_values(op: CmpOp, a: &[f64], b: &[f64]) -> Vec<f64> {
+    #[cfg(feature = "simd")]
+    {
+        if let Some(values) = crate::ops::simd::compare(op, a, b) {
+            return values;
+        }
+    }
+    a.iter().zip(b).map(|(&x, &y)| op.apply(x, y)).collect()
 }
 
 /// Applies `op` pointwise. With the `simd` feature, the vector kernel is used
@@ -215,7 +212,14 @@ impl NodeOp for Compare {
         }
         let a = operand_block(&self.lhs, region, &self.shape)?;
         let b = operand_block(&self.rhs, region, &self.shape)?;
-        Ok(zip_blocks(&a, &b, |x, y| self.op.apply(x, y)))
+        let values = compare_values(self.op, &a.values, &b.values);
+        let valid = a
+            .valid
+            .iter()
+            .zip(&b.valid)
+            .map(|(&p, &q)| p && q)
+            .collect();
+        Ok(Block { values, valid })
     }
 }
 

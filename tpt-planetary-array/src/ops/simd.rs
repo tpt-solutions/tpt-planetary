@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use tpt_simd_vector::Simd;
 
-use crate::ops::elementwise::{ArithOp, UnaryOp};
+use crate::ops::elementwise::{ArithOp, CmpOp, UnaryOp};
 
 /// Number of `f64` lanes per vector.
 const LANES: usize = 4;
@@ -41,6 +41,36 @@ pub(crate) fn arith(op: ArithOp, a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
     {
         let r = vector_op(V::from_slice(ca), V::from_slice(cb));
         out.extend_from_slice(&r.0);
+    }
+    out.extend(
+        a[split..]
+            .iter()
+            .zip(&b[split..])
+            .map(|(&x, &y)| op.apply(x, y)),
+    );
+    Some(out)
+}
+
+/// Elementwise comparison, giving 1.0 where it holds and 0.0 elsewhere. Lane
+/// comparisons are IEEE, so NaN compares false exactly as the scalar test does.
+pub(crate) fn compare(op: CmpOp, a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+    debug_assert_eq!(a.len(), b.len());
+    let split = a.len() - a.len() % LANES;
+    let mut out = Vec::with_capacity(a.len());
+    for (ca, cb) in a[..split]
+        .chunks_exact(LANES)
+        .zip(b[..split].chunks_exact(LANES))
+    {
+        let (x, y) = (V::from_slice(ca), V::from_slice(cb));
+        let holds = match op {
+            CmpOp::Lt => x.simd_lt(y),
+            CmpOp::Le => x.simd_le(y),
+            CmpOp::Gt => x.simd_gt(y),
+            CmpOp::Ge => x.simd_ge(y),
+            CmpOp::Eq => x.simd_eq(y),
+            CmpOp::Ne => x.simd_ne(y),
+        };
+        out.extend(holds.to_array().iter().map(|&h| if h { 1.0 } else { 0.0 }));
     }
     out.extend(
         a[split..]
@@ -250,5 +280,52 @@ mod tests {
         let nan = stats(&[f64::NAN; 6]);
         assert_eq!(nan.count, 0);
         assert!(nan.has_nan);
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod compare_tests {
+    use super::*;
+
+    #[test]
+    fn compare_matches_scalar_reference_including_nan_and_signed_zero() {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let specials = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2.5,
+        ];
+        for (i, &x) in specials.iter().enumerate() {
+            for (j, &y) in specials.iter().enumerate() {
+                if (i + j) % 3 != 0 {
+                    a.push(x);
+                    b.push(y);
+                }
+            }
+        }
+        // A tail that is not a whole vector, to exercise the scalar part.
+        a.push(3.0);
+        b.push(3.0);
+        for op in [
+            CmpOp::Lt,
+            CmpOp::Le,
+            CmpOp::Gt,
+            CmpOp::Ge,
+            CmpOp::Eq,
+            CmpOp::Ne,
+        ] {
+            let got = compare(op, &a, &b).unwrap();
+            let want: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| op.apply(x, y)).collect();
+            assert_eq!(got.len(), want.len());
+            for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "{op:?} at {k}");
+            }
+        }
     }
 }
