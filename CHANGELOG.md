@@ -105,6 +105,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - UT1 in `tptplan astro convert` (`--eop FILE`, an IERS finals2000A file), checked
   against astropy's IERS-B values; interpolation across a gap of more than a day is
   an error.
+- IERS C04 time series (`eopc04`) read by `parse_c04`, and `parse_eop_text` picks
+  C04 or finals2000A from the file header; `tptplan astro convert --eop` accepts both.
+  Checked on a 2017 excerpt against the finals2000A rows for the same dates.
 - Binary PCK orientation (`pck::orientation_matrix`): the J2000 to ITRF93 rotation from
   a type-2 PCK, checked against SPICE's pxform.
 - IAU 2000B nutation (`nutation::nutation_angles_2000b`), from ERFA's `nut00b`
