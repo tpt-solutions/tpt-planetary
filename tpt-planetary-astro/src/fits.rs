@@ -2213,6 +2213,270 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
     Ok(out)
 }
 
+#[cfg(feature = "std")]
+/// Values of one column of an ASCII table, as stored, as text fields of a fixed
+/// width. The physical value read back is `tzero + tscal * stored`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AsciiData<'a> {
+    /// `Aw`: strings, one per row, left-justified and padded with spaces.
+    Text(&'a [&'a str], usize),
+    /// `Iw`: integers, right-justified in `w` characters.
+    Int(&'a [i64], usize),
+    /// `Fw.d`: fixed-point numbers with `d` decimals in `w` characters.
+    Fixed(&'a [f64], usize, usize),
+    /// `Ew.d`: numbers in exponential form with `d` decimals in `w` characters,
+    /// as `1.2345E+03`.
+    Exp(&'a [f64], usize, usize),
+}
+
+#[cfg(feature = "std")]
+/// One column of an ASCII table to write.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AsciiTableColumn<'a> {
+    /// Column name (`TTYPEn`).
+    pub name: &'a str,
+    /// Values, one per row.
+    pub data: AsciiData<'a>,
+    /// `TSCALn`: physical = `tzero + tscal * stored`. Use 1.0 for none.
+    pub tscal: f64,
+    /// `TZEROn`. Use 0.0 for none.
+    pub tzero: f64,
+    /// `TNULLn`: the integer text that marks an undefined integer value.
+    pub tnull: Option<i64>,
+}
+
+#[cfg(feature = "std")]
+impl AsciiData<'_> {
+    fn width(&self) -> usize {
+        match self {
+            AsciiData::Text(_, w)
+            | AsciiData::Int(_, w)
+            | AsciiData::Fixed(_, w, _)
+            | AsciiData::Exp(_, w, _) => *w,
+        }
+    }
+
+    fn rows(&self) -> usize {
+        match self {
+            AsciiData::Text(v, _) => v.len(),
+            AsciiData::Int(v, _) => v.len(),
+            AsciiData::Fixed(v, _, _) | AsciiData::Exp(v, _, _) => v.len(),
+        }
+    }
+
+    fn tform(&self) -> String {
+        match self {
+            AsciiData::Text(_, w) => format!("A{w}"),
+            AsciiData::Int(_, w) => format!("I{w}"),
+            AsciiData::Fixed(_, w, d) => format!("F{w}.{d}"),
+            AsciiData::Exp(_, w, d) => format!("E{w}.{d}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+/// Formats an exponential field as Fortran `E` form: a mantissa with `d`
+/// decimals, `E`, a sign and at least two exponent digits.
+fn fortran_exp(value: f64, d: usize) -> String {
+    let text = format!("{value:.d$e}");
+    let (mantissa, exponent) = text.split_once('e').expect("exponent");
+    let exp: i32 = exponent.parse().expect("exponent digits");
+    let sign = if exp < 0 { '-' } else { '+' };
+    format!("{mantissa}E{sign}{:02}", exp.abs())
+}
+
+#[cfg(feature = "std")]
+/// Writes one field of a row: right-justified numbers, left-justified text.
+/// Fails if the text is wider than the field.
+fn ascii_field(data: &AsciiData<'_>, row: usize) -> Result<String> {
+    let text = match data {
+        AsciiData::Text(v, w) => {
+            let s = v[row];
+            if s.len() > *w || !s.is_ascii() {
+                return Err(FitsError::ShapeMismatch);
+            }
+            format!("{s:<w$}")
+        }
+        AsciiData::Int(v, w) => format!("{:>w$}", v[row]),
+        AsciiData::Fixed(v, w, d) => {
+            let value = v[row];
+            if value.is_finite() {
+                format!("{value:>w$.d$}")
+            } else {
+                // Undefined: a blank field, which reads back as NaN.
+                " ".repeat(*w)
+            }
+        }
+        AsciiData::Exp(v, w, d) => {
+            let value = v[row];
+            if value.is_finite() {
+                format!("{:>w$}", fortran_exp(value, *d))
+            } else {
+                " ".repeat(*w)
+            }
+        }
+    };
+    if text.len() != data.width() {
+        return Err(FitsError::ShapeMismatch);
+    }
+    Ok(text)
+}
+
+#[cfg(feature = "std")]
+/// Writes an ASCII table: an empty primary HDU followed by an `ASCII TABLE`
+/// extension (`XTENSION = 'TABLE'`) holding `columns`. Fields are placed one
+/// after another with no gap, and `header` adds cards to the extension header.
+///
+/// Text is left-justified, integers and numbers right-justified. A non-finite
+/// float is written as a blank field, which reads back as NaN. `TNULLn` is the
+/// text of the undefined integer and is recorded in the header only.
+///
+/// # Errors
+///
+/// [`FitsError::ShapeMismatch`] if the columns disagree on the row count, or a
+/// value does not fit its field; [`FitsError::Unsupported`] for a non-finite
+/// `tscal` or `tzero`; [`FitsError::InvalidKeyword`] for a reserved keyword in
+/// `header`.
+pub fn write_ascii_table(
+    columns: &[AsciiTableColumn<'_>],
+    header: &[WriteCard<'_>],
+) -> Result<Vec<u8>> {
+    let mut rows: Option<usize> = None;
+    let mut width = 0usize;
+    for c in columns {
+        if !c.tscal.is_finite() || !c.tzero.is_finite() {
+            return Err(FitsError::Unsupported("TSCAL and TZERO must be finite"));
+        }
+        let n = c.data.rows();
+        match rows {
+            None => rows = Some(n),
+            Some(r) if r != n => return Err(FitsError::ShapeMismatch),
+            Some(_) => {}
+        }
+        width += c.data.width();
+    }
+    let rows = rows.unwrap_or(0);
+
+    let mut data = Vec::with_capacity(width * rows);
+    for row in 0..rows {
+        for c in columns {
+            let field = ascii_field(&c.data, row)?;
+            data.extend_from_slice(field.as_bytes());
+        }
+    }
+
+    let mut primary = Vec::new();
+    push_card(
+        &mut primary,
+        &logical("SIMPLE", true, "conforms to FITS standard"),
+    )?;
+    push_card(
+        &mut primary,
+        &WriteCard {
+            keyword: "BITPIX",
+            value: Some(Value::Integer(8)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut primary,
+        &WriteCard {
+            keyword: "NAXIS",
+            value: Some(Value::Integer(0)),
+            comment: "",
+        },
+    )?;
+    push_card(
+        &mut primary,
+        &logical("EXTEND", true, "file has extensions"),
+    )?;
+    let mut end = [b' '; CARD];
+    end[..3].copy_from_slice(b"END");
+    primary.extend_from_slice(&end);
+    primary.resize(primary.len().div_ceil(BLOCK) * BLOCK, b' ');
+
+    let mut ext = Vec::new();
+    push_card(
+        &mut ext,
+        &WriteCard {
+            keyword: "XTENSION",
+            value: Some(Value::Text("TABLE")),
+            comment: "ASCII table extension",
+        },
+    )?;
+    for (keyword, value) in [
+        ("BITPIX", 8i64),
+        ("NAXIS", 2),
+        ("NAXIS1", width as i64),
+        ("NAXIS2", rows as i64),
+        ("PCOUNT", 0),
+        ("GCOUNT", 1),
+        ("TFIELDS", columns.len() as i64),
+    ] {
+        push_card(
+            &mut ext,
+            &WriteCard {
+                keyword,
+                value: Some(Value::Integer(value)),
+                comment: "",
+            },
+        )?;
+    }
+    let mut start = 1usize;
+    for (i, c) in columns.iter().enumerate() {
+        let n = i + 1;
+        let tbcol = format!("TBCOL{n}");
+        let tform = format!("TFORM{n}");
+        let ttype = format!("TTYPE{n}");
+        let tscal = format!("TSCAL{n}");
+        let tzero = format!("TZERO{n}");
+        let tnull = format!("TNULL{n}");
+        let form = c.data.tform();
+        let numeric = !matches!(c.data, AsciiData::Text(..));
+        let null_text = c.tnull.map(|v| v.to_string());
+        let mut cards: Vec<(String, Value<'_>)> = vec![
+            (tbcol, Value::Integer(start as i64)),
+            (tform, Value::Text(&form)),
+            (ttype, Value::Text(c.name)),
+        ];
+        if numeric && c.tscal != 1.0 {
+            cards.push((tscal, Value::Float(c.tscal)));
+        }
+        if numeric && c.tzero != 0.0 {
+            cards.push((tzero, Value::Float(c.tzero)));
+        }
+        if let (true, Some(text)) = (matches!(c.data, AsciiData::Int(..)), &null_text) {
+            cards.push((tnull, Value::Text(text)));
+        }
+        for (keyword, value) in &cards {
+            push_card(
+                &mut ext,
+                &WriteCard {
+                    keyword,
+                    value: Some(*value),
+                    comment: "",
+                },
+            )?;
+        }
+        start += c.data.width();
+    }
+    for card in header {
+        if is_reserved(card.keyword) {
+            return Err(FitsError::InvalidKeyword);
+        }
+        push_card(&mut ext, card)?;
+    }
+    ext.extend_from_slice(&end);
+    ext.resize(ext.len().div_ceil(BLOCK) * BLOCK, b' ');
+
+    let padded = data.len().div_ceil(BLOCK) * BLOCK;
+    let mut out = primary;
+    out.extend_from_slice(&ext);
+    out.extend_from_slice(&data);
+    out.resize(out.len() + (padded - data.len()), b' ');
+    Ok(out)
+}
+
 #[cfg(test)]
 #[cfg(feature = "std")]
 mod tests {
