@@ -14,8 +14,9 @@
 //! - Fixed-format and free-format cards, with `''` escapes in strings and
 //!   Fortran `D` exponents in numbers.
 //!
-//! Not supported, and rejected with an error: binary and ASCII tables, tile or
-//! other compression, random groups, and `CONTINUE` long-string cards. A
+//! Not supported, and rejected with an error: writing ASCII tables, variable-length,
+//! bit and complex binary columns, tile or other compression, random groups, and
+//! `CONTINUE` long-string cards. A
 //! `HIERARCH` card is returned as a commentary card and is not interpreted.
 //! A final data block that lacks its zero padding is accepted.
 //!
@@ -67,6 +68,8 @@ pub enum FitsError {
     },
     /// A required keyword is missing, or has a value that cannot be used.
     InvalidHeader(&'static str),
+    /// A data field is malformed, for example a non-numeric ASCII table field.
+    InvalidData(&'static str),
     /// Valid FITS that this module does not read or write.
     Unsupported(&'static str),
     /// The output buffer does not match the number of pixels.
@@ -97,6 +100,7 @@ impl fmt::Display for FitsError {
             Self::Truncated(what) => write!(f, "truncated FITS data: {what}"),
             Self::InvalidCard { offset } => write!(f, "invalid FITS card at byte {offset}"),
             Self::InvalidHeader(what) => write!(f, "invalid FITS header: {what}"),
+            Self::InvalidData(what) => write!(f, "invalid FITS data: {what}"),
             Self::Unsupported(what) => write!(f, "unsupported FITS feature: {what}"),
             Self::BufferMismatch { expected, actual } => {
                 write!(f, "buffer has {actual} elements, HDU has {expected}")
@@ -427,6 +431,7 @@ pub struct Hdu<'a> {
     bscale: f64,
     bzero: f64,
     table: bool,
+    ascii: bool,
 }
 
 impl<'a> Hdu<'a> {
@@ -699,20 +704,21 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
             ));
         }
         match first_card.value {
-            Some(Value::Text(t)) if t.trim_end() == "IMAGE" || t.trim_end() == "BINTABLE" => {}
+            Some(Value::Text(t)) if matches!(t.trim_end(), "IMAGE" | "BINTABLE" | "TABLE") => {}
             Some(Value::Text(_)) => {
                 return Err(FitsError::Unsupported(
-                    "XTENSION other than IMAGE and BINTABLE (ASCII tables are not supported)",
+                    "XTENSION other than IMAGE, BINTABLE and TABLE",
                 ));
             }
             _ => return Err(FitsError::InvalidHeader("XTENSION is not a string")),
         }
     }
-    let table = !first
-        && matches!(
-            header.get("XTENSION"),
-            Some(Value::Text(t)) if t.trim_end() == "BINTABLE"
-        );
+    let xtension = match header.get("XTENSION") {
+        Some(Value::Text(t)) if !first => t.trim_end(),
+        _ => "",
+    };
+    let table = xtension == "BINTABLE";
+    let ascii = xtension == "TABLE";
 
     let bitpix = header
         .get("BITPIX")
@@ -774,6 +780,7 @@ fn parse_hdu(bytes: &[u8], offset: usize, first: bool) -> Result<(Hdu<'_>, usize
             bscale,
             bzero,
             table,
+            ascii,
         },
         used,
     ))
@@ -1568,6 +1575,265 @@ impl<'a> Table<'a> {
     }
 }
 
+/// The storage type of one column of an ASCII table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsciiKind {
+    /// `Aw`: text, `w` characters per row.
+    Char,
+    /// `Iw`: a decimal integer in `w` characters.
+    Int,
+    /// `Fw.d`, `Ew.d` or `Dw.d`: a decimal number in `w` characters. A `D`
+    /// exponent is read as `E`.
+    Float,
+}
+
+/// One column of an ASCII table, with its position and scaling from the header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsciiColumn {
+    /// Column name (`TTYPEn`), or empty if the header has none.
+    pub name: String,
+    /// Storage type.
+    pub kind: AsciiKind,
+    /// Field width in characters (`w` of `TFORMn`).
+    pub width: usize,
+    /// Zero-based byte offset of the field within a row (`TBCOLn - 1`).
+    start: usize,
+    /// Physical value = `zero + scale * stored`.
+    scale: f64,
+    zero: f64,
+    /// Text that stands for an undefined field (`TNULLn`, a string in ASCII tables).
+    null: Option<String>,
+}
+
+/// An ASCII table extension (`XTENSION = 'TABLE'`): rows of fixed-width text
+/// fields.
+#[derive(Debug, Clone)]
+pub struct AsciiTable<'a> {
+    data: &'a [u8],
+    rows: usize,
+    row_bytes: usize,
+    columns: Vec<AsciiColumn>,
+}
+
+/// Parses an ASCII table `TFORMn` value (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`) into
+/// its kind and field width.
+fn parse_ascii_tform(text: &str) -> Option<(AsciiKind, usize)> {
+    let t = text.trim();
+    let mut chars = t.chars();
+    let code = chars.next()?;
+    let kind = match code {
+        'A' => AsciiKind::Char,
+        'I' => AsciiKind::Int,
+        'F' | 'E' | 'D' => AsciiKind::Float,
+        _ => return None,
+    };
+    let width_text = chars.as_str().split('.').next()?;
+    let width: usize = width_text.trim().parse().ok()?;
+    if width == 0 {
+        return None;
+    }
+    Some((kind, width))
+}
+
+impl<'a> Hdu<'a> {
+    /// True if this extension is an ASCII table (`XTENSION = 'TABLE'`).
+    #[must_use]
+    pub fn is_ascii_table(&self) -> bool {
+        self.ascii
+    }
+
+    /// Reads this ASCII table extension.
+    ///
+    /// Each column is a field of `TFORMn` width starting at `TBCOLn`. Fields
+    /// that are blank or equal to `TNULLn` are undefined.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::InvalidHeader`] if the HDU is not an ASCII table or a column
+    /// description does not fit in `NAXIS1`, and [`FitsError::Unsupported`] for a
+    /// `TFORMn` other than `A`, `I`, `F`, `E` and `D`.
+    pub fn ascii_table(&self) -> Result<AsciiTable<'a>> {
+        if !self.ascii {
+            return Err(FitsError::InvalidHeader("the HDU is not an ASCII table"));
+        }
+        let header = self.header;
+        let row_bytes = header
+            .get("NAXIS1")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("NAXIS1 (row width) missing"))?;
+        let rows = header
+            .get("NAXIS2")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("NAXIS2 (row count) missing"))?;
+        let fields = header
+            .get("TFIELDS")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(FitsError::InvalidHeader("TFIELDS missing"))?;
+        let table_len = rows
+            .checked_mul(row_bytes)
+            .ok_or(FitsError::InvalidHeader("table size overflows"))?;
+        if table_len > self.data.len() {
+            return Err(FitsError::Truncated(
+                "table data is shorter than NAXIS1 x NAXIS2",
+            ));
+        }
+
+        let mut columns = Vec::with_capacity(fields);
+        for n in 1..=fields {
+            let form = header
+                .get(&format!("TFORM{n}"))
+                .and_then(|v| text_value(v))
+                .ok_or(FitsError::InvalidHeader("TFORMn missing or not a string"))?;
+            let (kind, width) = parse_ascii_tform(form).ok_or(FitsError::Unsupported(
+                "this ASCII TFORM (only A, I, F, E and D are read)",
+            ))?;
+            let start = header
+                .get(&format!("TBCOL{n}"))
+                .and_then(|v| v.as_i64())
+                .and_then(|v| usize::try_from(v).ok())
+                .filter(|&v| v >= 1)
+                .ok_or(FitsError::InvalidHeader("TBCOLn missing or not positive"))?
+                - 1;
+            if start + width > row_bytes {
+                return Err(FitsError::InvalidHeader(
+                    "an ASCII field extends past NAXIS1",
+                ));
+            }
+            let name = header
+                .get(&format!("TTYPE{n}"))
+                .and_then(|v| text_value(v))
+                .map(|t| t.trim().to_string())
+                .unwrap_or_default();
+            let scale = header
+                .get(&format!("TSCAL{n}"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            let zero = header
+                .get(&format!("TZERO{n}"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let null = header
+                .get(&format!("TNULL{n}"))
+                .and_then(|v| text_value(v))
+                .map(|t| t.trim().to_string());
+            columns.push(AsciiColumn {
+                name,
+                kind,
+                width,
+                start,
+                scale,
+                zero,
+                null,
+            });
+        }
+        Ok(AsciiTable {
+            data: &self.data[..table_len],
+            rows,
+            row_bytes,
+            columns,
+        })
+    }
+}
+
+impl<'a> AsciiTable<'a> {
+    /// Number of rows.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Bytes per row (`NAXIS1`).
+    #[must_use]
+    pub fn row_bytes(&self) -> usize {
+        self.row_bytes
+    }
+
+    /// The columns, in file order.
+    #[must_use]
+    pub fn columns(&self) -> &[AsciiColumn] {
+        &self.columns
+    }
+
+    /// The column called `name`, if there is one.
+    #[must_use]
+    pub fn column(&self, name: &str) -> Option<&AsciiColumn> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Values of an integer or float column as `f64`, row by row. Scaling
+    /// (`TSCALn`, `TZEROn`) is applied; undefined fields become NaN.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::InvalidHeader`] if there is no such column,
+    /// [`FitsError::Unsupported`] for an `A` column, and
+    /// [`FitsError::InvalidData`] for a field that is not a number.
+    pub fn read_f64(&self, name: &str) -> Result<Vec<f64>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        if col.kind == AsciiKind::Char {
+            return Err(FitsError::Unsupported(
+                "read_f64 needs an integer or float column",
+            ));
+        }
+        let mut out = Vec::with_capacity(self.rows);
+        for row in 0..self.rows {
+            let at = row * self.row_bytes + col.start;
+            let field = &self.data[at..at + col.width];
+            let text: String = field.iter().map(|&b| char::from(b)).collect();
+            let trimmed = text.trim();
+            let undefined = trimmed.is_empty() || col.null.as_deref().is_some_and(|n| n == trimmed);
+            if undefined {
+                out.push(f64::NAN);
+                continue;
+            }
+            let value = match col.kind {
+                AsciiKind::Int => trimmed
+                    .parse::<i64>()
+                    .map(|v| v as f64)
+                    .map_err(|_| FitsError::InvalidData("an integer field is not a number"))?,
+                AsciiKind::Float => trimmed
+                    .replace(['D', 'd'], "E")
+                    .parse::<f64>()
+                    .map_err(|_| FitsError::InvalidData("a float field is not a number"))?,
+                AsciiKind::Char => unreachable!("checked above"),
+            };
+            out.push(col.zero + col.scale * value);
+        }
+        Ok(out)
+    }
+
+    /// Text of an `A` column, one string per row, with surrounding spaces
+    /// removed.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::InvalidHeader`] if there is no such column or it is not an
+    /// `A` column.
+    pub fn read_strings(&self, name: &str) -> Result<Vec<String>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        if col.kind != AsciiKind::Char {
+            return Err(FitsError::InvalidHeader("read_strings needs an A column"));
+        }
+        Ok((0..self.rows)
+            .map(|row| {
+                let at = row * self.row_bytes + col.start;
+                let text: String = self.data[at..at + col.width]
+                    .iter()
+                    .map(|&b| char::from(b))
+                    .collect();
+                text.trim_matches([' ', '\0']).to_string()
+            })
+            .collect())
+    }
+}
+
 /// The physical value of one stored element of a numeric or logical column.
 fn decode_element(col: &Column, raw: &[u8]) -> f64 {
     let integer = |v: i64| {
@@ -2098,8 +2364,9 @@ mod tests {
     }
 
     #[test]
-    fn ascii_table_extension_is_rejected() {
-        // Same length as 'BINTABLE', so the header layout is unchanged.
+    fn ascii_table_extension_is_recognised() {
+        // Same length as 'BINTABLE', so the header layout is unchanged. The
+        // binary TFORM codes are not ASCII forms, so the ASCII reader refuses them.
         let mut ascii = BINTABLE.to_vec();
         let at = ascii
             .windows(10)
@@ -2108,7 +2375,11 @@ mod tests {
         ascii[at..at + 10].copy_from_slice(b"'TABLE   '");
         let mut it = hdus(&ascii);
         assert!(it.next().unwrap().is_ok());
-        assert!(matches!(it.next(), Some(Err(FitsError::Unsupported(_)))));
+        let hdu = it.next().unwrap().unwrap();
+        assert!(hdu.is_ascii_table());
+        assert!(!hdu.is_table());
+        assert!(matches!(hdu.ascii_table(), Err(FitsError::Unsupported(_))));
+        assert!(matches!(hdu.table(), Err(FitsError::InvalidHeader(_))));
     }
 
     #[test]
