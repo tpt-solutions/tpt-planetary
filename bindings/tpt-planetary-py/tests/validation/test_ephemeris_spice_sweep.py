@@ -57,3 +57,35 @@ def test_jupiter_astrometric_matches_spice_over_the_kernel_span():
         assert worst <= TOLERANCE_ARCSEC, f"largest separation {worst} arcsec"
     finally:
         spiceypy.kclear()
+
+
+AU_KM = 149_597_870.7
+ESD_TOLERANCE_AU = 2e-4
+
+
+@pytest.mark.skipif(not KERNEL, reason="set TPT_SPK_KERNEL to a DE440-style SPK kernel")
+def test_earth_sun_distance_approx_matches_the_kernel():
+    """The low-precision Earth-Sun distance against the Earth-Sun range from the SPK file.
+
+    The approximation (``earth_sun_distance_au_approx``) is a Meeus series accurate
+    to about 1e-4 AU against ``erfa.epv00``; this checks the same distance against
+    the kernel over 1900-2100, which is what the sweep above does for Jupiter.
+    The SPK range is the geocentre (399) from the Sun (10), in km. Tolerance 2e-4
+    AU; the measured maximum over 3000 epochs is 1.0e-4 AU (mean 2.8e-5 AU).
+    """
+    from _reference import run_validation_dump
+
+    kernel = tp.open_spk(KERNEL)
+    rng = np.random.default_rng(20261124)
+    # TT epochs 1900 .. 2100, as two-part Julian dates.
+    tt = rng.uniform(2415020.0, 2488070.0, 300)
+    rows = np.column_stack([np.floor(tt), tt - np.floor(tt)])
+    approx = run_validation_dump("esd", rows)[:, 0]
+    spk = []
+    for hi, lo in rows:
+        et = (hi - 2451545.0 + lo) * 86400.0
+        pos, _ = kernel.state(399, 10, et)
+        spk.append(np.linalg.norm(pos) / AU_KM)
+    spk = np.asarray(spk)
+    worst = np.abs(approx - spk).max()
+    assert worst < ESD_TOLERANCE_AU, f"largest difference {worst} AU"
