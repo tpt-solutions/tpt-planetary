@@ -99,6 +99,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and `read_vla` (with the heap and THEAP), checked against astropy.
 - FITS ASCII tables: `Hdu::ascii_table` reads `XTENSION = 'TABLE'` columns of A, I,
   F, E and D fields with scaling and TNULL, checked against astropy.
+- CK attitude kernels, type 2 (`ck::CkFile`): the C-matrix and angular velocity of an
+  instrument at an SCLK time, checked against SPICE's `ckgpav`.
 - Apparent directions from an SPK kernel (`ephemeris::apparent_direction`, and
   `tptplan ephemeris query --apparent`): light deflection by the Sun and annual
   aberration on the astrometric direction. Checked against Horizons apparent
