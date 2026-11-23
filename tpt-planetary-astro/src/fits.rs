@@ -1336,7 +1336,18 @@ pub enum ColumnKind {
     Double,
     /// `A`: character string, `repeat` bytes per row.
     Char,
-    /// A form this module does not read (bit, complex, variable-length, ...).
+    /// `X`: bits, `repeat` per row, packed most significant bit first into
+    /// `ceil(repeat / 8)` bytes.
+    Bit,
+    /// `C`: single-precision complex, 8 bytes per element.
+    ComplexFloat,
+    /// `M`: double-precision complex, 16 bytes per element.
+    ComplexDouble,
+    /// `P` or `Q` (the flag is true for `Q`): a variable-length array. Each row
+    /// holds a descriptor of the element count and the heap offset; the elements
+    /// have the type code given (`L`, `B`, `I`, `J`, `K`, `E` or `D`).
+    Variable(char, bool),
+    /// A form this module does not read.
     Other(char),
 }
 
@@ -1362,6 +1373,7 @@ pub struct Column {
 #[derive(Debug, Clone)]
 pub struct Table<'a> {
     data: &'a [u8],
+    heap: &'a [u8],
     rows: usize,
     row_bytes: usize,
     columns: Vec<Column>,
@@ -1381,6 +1393,19 @@ fn parse_tform(text: &str) -> Option<(usize, char)> {
     Some((repeat, code))
 }
 
+/// The element type and descriptor width of a variable-length `TFORM` such as
+/// `PJ(10)` or `1QD`: `(element code, wide)`, where wide means `Q`.
+fn parse_variable(form: &str) -> Option<(char, bool)> {
+    let t = form.trim().trim_start_matches(|c: char| c.is_ascii_digit());
+    let mut chars = t.chars();
+    let wide = match chars.next()? {
+        'P' => false,
+        'Q' => true,
+        _ => return None,
+    };
+    Some((chars.next()?, wide))
+}
+
 /// Column kind and bytes per element of a `TFORM` type code.
 fn element_kind(code: char) -> (ColumnKind, usize) {
     match code {
@@ -1392,6 +1417,9 @@ fn element_kind(code: char) -> (ColumnKind, usize) {
         'E' => (ColumnKind::Float, 4),
         'D' => (ColumnKind::Double, 8),
         'A' => (ColumnKind::Char, 1),
+        'X' => (ColumnKind::Bit, 1),
+        'C' => (ColumnKind::ComplexFloat, 8),
+        'M' => (ColumnKind::ComplexDouble, 16),
         other => (ColumnKind::Other(other), 0),
     }
 }
@@ -1448,16 +1476,32 @@ impl<'a> Hdu<'a> {
                 .ok_or(FitsError::InvalidHeader("TFORMn missing or not a string"))?;
             let (repeat, code) =
                 parse_tform(form).ok_or(FitsError::InvalidHeader("TFORMn is malformed"))?;
-            let (kind, size) = element_kind(code);
-            if let ColumnKind::Other(_) = kind {
-                return Err(FitsError::Unsupported(
-                    "this TFORM type (only L, B, I, J, K, E, D and A are read)",
-                ));
-            }
-            let width = if kind == ColumnKind::Char {
-                repeat
+            let (kind, size) = if code == 'P' || code == 'Q' {
+                let (element, wide) = parse_variable(form).ok_or(FitsError::InvalidHeader(
+                    "variable-length TFORMn is malformed",
+                ))?;
+                if !"LBIJKED".contains(element) {
+                    return Err(FitsError::Unsupported(
+                        "variable-length columns of this element type (only L, B, I, J, K, E and D)",
+                    ));
+                }
+                (
+                    ColumnKind::Variable(element, wide),
+                    if wide { 16 } else { 8 },
+                )
             } else {
-                size * repeat
+                let (kind, size) = element_kind(code);
+                if let ColumnKind::Other(_) = kind {
+                    return Err(FitsError::Unsupported(
+                        "this TFORM type (only L, B, I, J, K, E, D, A, X, C, M and P/Q are read)",
+                    ));
+                }
+                (kind, size)
+            };
+            let width = match kind {
+                ColumnKind::Char => repeat,
+                ColumnKind::Bit => repeat.div_ceil(8),
+                _ => size * repeat,
             };
             let name = header
                 .get(&format!("TTYPE{n}"))
@@ -1489,8 +1533,18 @@ impl<'a> Hdu<'a> {
                 "the columns are wider than NAXIS1",
             ));
         }
+        let theap = header
+            .get("THEAP")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(0);
+        let heap = self
+            .data
+            .get(table_len.saturating_add(theap)..)
+            .unwrap_or(&[]);
         Ok(Table {
             data: &self.data[..table_len],
+            heap,
             rows,
             row_bytes,
             columns,
@@ -1536,7 +1590,12 @@ impl<'a> Table<'a> {
             ColumnKind::Short => 2,
             ColumnKind::Int | ColumnKind::Float => 4,
             ColumnKind::Long | ColumnKind::Double => 8,
-            ColumnKind::Char | ColumnKind::Other(_) => {
+            ColumnKind::Char
+            | ColumnKind::Bit
+            | ColumnKind::ComplexFloat
+            | ColumnKind::ComplexDouble
+            | ColumnKind::Variable(..)
+            | ColumnKind::Other(_) => {
                 return Err(FitsError::Unsupported(
                     "read_f64 needs a numeric or logical column",
                 ));
@@ -1548,6 +1607,121 @@ impl<'a> Table<'a> {
             for k in 0..col.repeat {
                 let at = base + k * size;
                 out.push(decode_element(col, &self.data[at..at + size]));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The arrays of a `P` or `Q` column: one vector of physical values per row.
+    /// Elements are read from the heap; scaling (`TSCALn`, `TZEROn`) applies to
+    /// the elements, and undefined values become NaN.
+    pub fn read_vla(&self, name: &str) -> Result<Vec<Vec<f64>>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        let (element, wide) = match col.kind {
+            ColumnKind::Variable(element, wide) => (element, wide),
+            _ => return Err(FitsError::InvalidHeader("read_vla needs a P or Q column")),
+        };
+        let (kind, size) = element_kind(element);
+        let elem_col = Column {
+            name: col.name.clone(),
+            kind,
+            repeat: 1,
+            offset: 0,
+            scale: col.scale,
+            zero: col.zero,
+            null: col.null,
+        };
+        let mut out = Vec::with_capacity(self.rows);
+        for row in 0..self.rows {
+            let at = row * self.row_bytes + col.offset;
+            let (count, offset) = if wide {
+                (
+                    i64::from_be_bytes(self.data[at..at + 8].try_into().expect("8 bytes")),
+                    i64::from_be_bytes(self.data[at + 8..at + 16].try_into().expect("8 bytes")),
+                )
+            } else {
+                (
+                    i64::from(i32::from_be_bytes(
+                        self.data[at..at + 4].try_into().expect("4 bytes"),
+                    )),
+                    i64::from(i32::from_be_bytes(
+                        self.data[at + 4..at + 8].try_into().expect("4 bytes"),
+                    )),
+                )
+            };
+            let count = usize::try_from(count)
+                .map_err(|_| FitsError::InvalidData("negative element count in a descriptor"))?;
+            let offset = usize::try_from(offset)
+                .map_err(|_| FitsError::InvalidData("negative heap offset in a descriptor"))?;
+            let end = offset
+                .checked_add(count * size)
+                .ok_or(FitsError::InvalidData("heap offset overflows"))?;
+            let heap = self.heap.get(offset..end).ok_or(FitsError::Truncated(
+                "heap is shorter than a descriptor says",
+            ))?;
+            out.push(
+                heap.chunks_exact(size)
+                    .map(|raw| decode_element(&elem_col, raw))
+                    .collect(),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Bits of an `X` column, `repeat` per row, row-major. Bit `k` of a row is
+    /// bit `7 - k % 8` of byte `k / 8`, as the standard packs them.
+    pub fn read_bits(&self, name: &str) -> Result<Vec<bool>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        if col.kind != ColumnKind::Bit {
+            return Err(FitsError::InvalidHeader("read_bits needs an X column"));
+        }
+        let mut out = Vec::with_capacity(self.rows * col.repeat);
+        for row in 0..self.rows {
+            let base = row * self.row_bytes + col.offset;
+            for k in 0..col.repeat {
+                let byte = self.data[base + k / 8];
+                out.push((byte >> (7 - k % 8)) & 1 == 1);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Complex values of a `C` or `M` column, `repeat` per row, row-major, as
+    /// (real, imaginary) pairs. Scaling is not applied.
+    pub fn read_complex(&self, name: &str) -> Result<Vec<(f64, f64)>> {
+        let col = self
+            .column(name)
+            .ok_or(FitsError::InvalidHeader("no column with that name"))?;
+        let part = match col.kind {
+            ColumnKind::ComplexFloat => 4,
+            ColumnKind::ComplexDouble => 8,
+            _ => {
+                return Err(FitsError::InvalidHeader(
+                    "read_complex needs a C or M column",
+                ));
+            }
+        };
+        let read = |bytes: &[u8]| -> f64 {
+            if part == 4 {
+                f64::from(f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            } else {
+                f64::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ])
+            }
+        };
+        let mut out = Vec::with_capacity(self.rows * col.repeat);
+        for row in 0..self.rows {
+            let base = row * self.row_bytes + col.offset;
+            for k in 0..col.repeat {
+                let at = base + k * 2 * part;
+                let re = read(&self.data[at..at + part]);
+                let im = read(&self.data[at + part..at + 2 * part]);
+                out.push((re, im));
             }
         }
         Ok(out)
@@ -1867,7 +2041,12 @@ fn decode_element(col: &Column, raw: &[u8]) -> f64 {
             ]);
             col.zero + col.scale * v
         }
-        ColumnKind::Char | ColumnKind::Other(_) => f64::NAN,
+        ColumnKind::Char
+        | ColumnKind::Bit
+        | ColumnKind::ComplexFloat
+        | ColumnKind::ComplexDouble
+        | ColumnKind::Variable(..)
+        | ColumnKind::Other(_) => f64::NAN,
     }
 }
 
