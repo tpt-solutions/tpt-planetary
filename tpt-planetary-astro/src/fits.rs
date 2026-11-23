@@ -15,9 +15,10 @@
 //!   Fortran `D` exponents in numbers.
 //!
 //! Tile-compressed integer images with `RICE_1` are decompressed by
-//! [`Hdu::compressed_values`]. Not supported, and rejected with an error: dithered
-//! quantized float tiles, other tile compression (`HCOMPRESS`, `PLIO`), writing
-//! tile-compressed images, random groups, and `CONTINUE` long-string cards. A `HIERARCH` card is returned as a commentary card
+//! [`Hdu::compressed_values`], and integer images can be written tile-compressed
+//! with [`write_compressed_image`]. Not supported, and rejected with an error:
+//! dithered quantized float tiles, other tile compression (`HCOMPRESS`, `PLIO`),
+//! writing float or quantized images, random groups, and `CONTINUE` long-string cards. A `HIERARCH` card is returned as a commentary card
 //! and is not interpreted.
 //! A final data block that lacks its zero padding is accepted.
 //!
@@ -2759,6 +2760,155 @@ pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> 
 }
 
 #[cfg(feature = "std")]
+/// The pixels of an integer image to tile-compress, in their stored type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(feature = "std")]
+pub enum CompressedPixels<'a> {
+    /// `BITPIX 8`.
+    U8(&'a [u8]),
+    /// `BITPIX 16`.
+    I16(&'a [i16]),
+    /// `BITPIX 32`.
+    I32(&'a [i32]),
+}
+
+/// The tile compression of a written image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "std")]
+pub enum TileMethod {
+    /// `RICE_1`, with the given block size (typically 32).
+    Rice1,
+    /// `GZIP_1`: deflate of the big-endian pixels.
+    Gzip1,
+    /// `GZIP_2`: deflate of the byte-shuffled pixels.
+    Gzip2,
+}
+
+/// Writes an integer image as a tile-compressed extension: an empty primary HDU
+/// and a binary table with `ZIMAGE = T`, one row per tile holding the compressed
+/// bytes in the `COMPRESSED_DATA` column. Tiles are cut and ordered as
+/// [`Hdu::compressed_values`] reads them back.
+///
+/// `dims` holds the image axes, `NAXIS1` first, and `tiles` the tile size on
+/// each axis. Edge tiles are clipped.
+///
+/// # Errors
+///
+/// [`FitsError::ShapeMismatch`] if the pixel count does not match `dims`, or the
+/// tile and axis counts differ; [`FitsError::Unsupported`] for a tile of zero
+/// size or a zero-length axis.
+#[cfg(feature = "std")]
+pub fn write_compressed_image(
+    pixels: CompressedPixels<'_>,
+    dims: &[usize],
+    tiles: &[usize],
+    method: TileMethod,
+) -> Result<Vec<u8>> {
+    let (count, bitpix, bytepix) = match pixels {
+        CompressedPixels::U8(v) => (v.len(), 8i64, 1usize),
+        CompressedPixels::I16(v) => (v.len(), 16, 2),
+        CompressedPixels::I32(v) => (v.len(), 32, 4),
+    };
+    let total: usize = dims.iter().product();
+    if dims.is_empty() || total != count || dims.len() != tiles.len() {
+        return Err(FitsError::ShapeMismatch);
+    }
+    if dims.contains(&0) || tiles.contains(&0) {
+        return Err(FitsError::Unsupported("a zero-length axis or tile"));
+    }
+    let blocksize = 32usize;
+
+    let counts: Vec<usize> = dims
+        .iter()
+        .zip(tiles)
+        .map(|(&d, &t)| d.div_ceil(t))
+        .collect();
+    let mut stride = Vec::with_capacity(dims.len());
+    let mut acc = 1usize;
+    for &d in dims {
+        stride.push(acc);
+        acc *= d;
+    }
+    let tile_total: usize = counts.iter().product();
+    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(tile_total);
+    for t in 0..tile_total {
+        // Origin and clipped extent of this tile, fastest axis first.
+        let mut rest = t;
+        let mut origin = Vec::with_capacity(dims.len());
+        let mut extent = Vec::with_capacity(dims.len());
+        for k in 0..dims.len() {
+            let g = rest % counts[k];
+            rest /= counts[k];
+            let start = g * tiles[k];
+            origin.push(start);
+            extent.push(tiles[k].min(dims[k] - start));
+        }
+        let npix: usize = extent.iter().product();
+        let mut values = Vec::with_capacity(npix);
+        for p in 0..npix {
+            let mut q = p;
+            let mut flat = 0usize;
+            for k in 0..dims.len() {
+                let c = q % extent[k];
+                q /= extent[k];
+                flat += (origin[k] + c) * stride[k];
+            }
+            values.push(match pixels {
+                CompressedPixels::U8(v) => u32::from(v[flat]),
+                CompressedPixels::I16(v) => u32::from(v[flat] as u16),
+                CompressedPixels::I32(v) => v[flat] as u32,
+            });
+        }
+        encoded.push(match method {
+            TileMethod::Rice1 => tile::rice_encode(&values, bytepix, blocksize)?,
+            TileMethod::Gzip1 => tile::gzip_tile_encode(&values, bytepix, false),
+            TileMethod::Gzip2 => tile::gzip_tile_encode(&values, bytepix, true),
+        });
+    }
+
+    // Header: the tile-compression keywords, with the names the reader looks up.
+    let method_name = match method {
+        TileMethod::Rice1 => "RICE_1",
+        TileMethod::Gzip1 => "GZIP_1",
+        TileMethod::Gzip2 => "GZIP_2",
+    };
+    let mut entries: Vec<(String, Value<'static>)> = vec![
+        ("ZIMAGE".into(), Value::Logical(true)),
+        ("ZCMPTYPE".into(), Value::Text(method_name)),
+        ("ZBITPIX".into(), Value::Integer(bitpix)),
+        ("ZNAXIS".into(), Value::Integer(dims.len() as i64)),
+    ];
+    for (k, (&d, &t)) in dims.iter().zip(tiles).enumerate() {
+        entries.push((format!("ZNAXIS{}", k + 1), Value::Integer(d as i64)));
+        entries.push((format!("ZTILE{}", k + 1), Value::Integer(t as i64)));
+    }
+    if method == TileMethod::Rice1 {
+        entries.push(("ZNAME1".into(), Value::Text("BLOCKSIZE")));
+        entries.push(("ZVAL1".into(), Value::Integer(blocksize as i64)));
+        entries.push(("ZNAME2".into(), Value::Text("BYTEPIX")));
+        entries.push(("ZVAL2".into(), Value::Integer(bytepix as i64)));
+    }
+    let cards: Vec<WriteCard<'_>> = entries
+        .iter()
+        .map(|(keyword, value)| WriteCard {
+            keyword: keyword.as_str(),
+            value: Some(*value),
+            comment: "",
+        })
+        .collect();
+
+    let rows: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+    let column = TableColumn {
+        name: "COMPRESSED_DATA",
+        data: ColumnData::Variable(VarElements::Byte(&rows), false),
+        repeat: 1,
+        tscal: 1.0,
+        tzero: 0.0,
+        tnull: None,
+    };
+    write_bintable(&[column], &cards)
+}
+
 /// Values of one column of an ASCII table, as stored, as text fields of a fixed
 /// width. The physical value read back is `tzero + tscal * stored`.
 #[derive(Debug, Clone, Copy, PartialEq)]

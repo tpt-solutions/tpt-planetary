@@ -214,3 +214,252 @@ pub fn gzip_decode(data: &[u8], bytepix: usize, shuffled: bool, out: &mut [u32])
     }
     Ok(())
 }
+
+#[cfg(feature = "std")]
+/// Writes bits, most significant first.
+struct BitWriter {
+    out: Vec<u8>,
+    acc: u64,
+    nacc: u32,
+}
+
+#[cfg(feature = "std")]
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            acc: 0,
+            nacc: 0,
+        }
+    }
+
+    /// The low `n` bits of `value`, `n <= 32`.
+    fn bits(&mut self, value: u32, n: u32) {
+        if n == 0 {
+            return;
+        }
+        self.acc = (self.acc << n) | (u64::from(value) & ((1u64 << n) - 1));
+        self.nacc += n;
+        while self.nacc >= 8 {
+            self.nacc -= 8;
+            self.out.push((self.acc >> self.nacc) as u8);
+        }
+        self.acc &= (1u64 << self.nacc) - 1;
+    }
+
+    /// `count` zero bits followed by a one bit.
+    fn unary(&mut self, count: u64) {
+        let mut left = count;
+        while left >= 32 {
+            self.bits(0, 32);
+            left -= 32;
+        }
+        self.bits(0, left as u32);
+        self.bits(1, 1);
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.nacc > 0 {
+            let pad = 8 - self.nacc;
+            self.bits(0, pad);
+        }
+        self.out
+    }
+}
+
+#[cfg(feature = "std")]
+/// Maps a signed difference (in `bytepix` bytes of two's complement) to the
+/// unsigned zig-zag code that the decoder inverts.
+fn zigzag(d: i64) -> u32 {
+    // d fits in 32 bits for every supported byte width.
+    let d = d as i32;
+    ((d << 1) ^ (d >> 31)) as u32
+}
+
+#[cfg(feature = "std")]
+/// Encodes `values` (the pixel bit patterns in their `bytepix` width) as a RICE_1
+/// stream, the inverse of [`rice_decode`]. The first value is stored in full, and
+/// each block of `nblock` differences uses the Rice parameter that codes it in
+/// the fewest bits, or raw bits when that is shorter.
+pub fn rice_encode(values: &[u32], bytepix: usize, nblock: usize) -> Result<Vec<u8>> {
+    let (fsbits, fsmax, bbits) = match bytepix {
+        1 => (3u32, 6u32, 8u32),
+        2 => (4, 14, 16),
+        4 => (5, 25, 32),
+        _ => {
+            return Err(FitsError::Unsupported(
+                "RICE_1 with a byte width other than 1, 2 or 4",
+            ));
+        }
+    };
+    if nblock == 0 {
+        return Err(FitsError::InvalidHeader("RICE_1 BLOCKSIZE is zero"));
+    }
+    let mask = if bytepix == 4 {
+        u32::MAX
+    } else {
+        (1u32 << (8 * bytepix)) - 1
+    };
+    let mut out = Vec::new();
+    let first = values.first().copied().unwrap_or(0);
+    for k in (0..bytepix).rev() {
+        out.push((first >> (8 * k)) as u8);
+    }
+    let mut bits = BitWriter::new();
+    let mut last = first & mask;
+    for block in values.chunks(nblock) {
+        // Differences in the pixel width, zig-zag coded.
+        let mut codes = Vec::with_capacity(block.len());
+        for &x in block {
+            let x = x & mask;
+            // Sign-extend the difference from the pixel width.
+            let shift = 32 - 8 * bytepix as u32;
+            let d = (((x.wrapping_sub(last)) << shift) as i32) >> shift;
+            codes.push(zigzag(i64::from(d)));
+            last = x;
+        }
+        if codes.iter().all(|&m| m == 0) {
+            bits.bits(0, fsbits);
+            continue;
+        }
+        // The Rice parameter with the fewest bits, from 0 to fsmax - 1.
+        let (best_k, best_cost) = (0..fsmax)
+            .map(|k| {
+                let cost: u64 = codes
+                    .iter()
+                    .map(|&m| u64::from(m >> k) + 1 + u64::from(k))
+                    .sum();
+                (k, cost)
+            })
+            .min_by_key(|&(_, cost)| cost)
+            .expect("at least one parameter");
+        let raw_cost = u64::from(bbits) * codes.len() as u64;
+        if best_cost >= raw_cost {
+            bits.bits(fsmax + 1, fsbits);
+            for &m in &codes {
+                bits.bits(m, bbits);
+            }
+        } else {
+            bits.bits(best_k + 1, fsbits);
+            for &m in &codes {
+                bits.unary(u64::from(m >> best_k));
+                bits.bits(m, best_k);
+            }
+        }
+    }
+    out.extend(bits.finish());
+    Ok(out)
+}
+
+#[cfg(feature = "std")]
+/// CRC-32 (IEEE, as used by gzip), bit by bit.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+#[cfg(feature = "std")]
+/// Wraps `data` in a gzip member (RFC 1952) with a deflate body.
+pub fn gzip_encode(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    out.extend(miniz_oxide::deflate::compress_to_vec(data, 6));
+    out.extend_from_slice(&crc32(data).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out
+}
+
+#[cfg(feature = "std")]
+/// Encodes one GZIP_1 or GZIP_2 tile of pixel bit patterns of `bytepix` bytes:
+/// the big-endian bytes, or for GZIP_2 the byte planes, most significant first.
+pub fn gzip_tile_encode(values: &[u32], bytepix: usize, shuffled: bool) -> Vec<u8> {
+    let n = values.len();
+    let mut bytes = vec![0u8; n * bytepix];
+    for (i, &v) in values.iter().enumerate() {
+        for p in 0..bytepix {
+            let byte = (v >> (8 * (bytepix - 1 - p))) as u8;
+            if shuffled {
+                bytes[p * n + i] = byte;
+            } else {
+                bytes[i * bytepix + p] = byte;
+            }
+        }
+    }
+    gzip_encode(&bytes)
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    /// Deterministic pseudo-random words (xorshift), for test data.
+    fn words(seed: u32, n: usize, mask: u32) -> Vec<u32> {
+        let mut x = seed.max(1);
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x & mask
+            })
+            .collect()
+    }
+
+    fn rice_roundtrip(values: &[u32], bytepix: usize) {
+        let stream = rice_encode(values, bytepix, 32).unwrap();
+        let mut out = vec![0u32; values.len()];
+        rice_decode(&stream, bytepix, 32, &mut out).unwrap();
+        let mask = if bytepix == 4 {
+            u32::MAX
+        } else {
+            (1 << (8 * bytepix)) - 1
+        };
+        let want: Vec<u32> = values.iter().map(|v| v & mask).collect();
+        let got: Vec<u32> = out.iter().map(|v| v & mask).collect();
+        assert_eq!(got, want, "bytepix {bytepix}");
+    }
+
+    #[test]
+    fn rice_round_trips_smooth_noisy_constant_and_extreme_data() {
+        let smooth: Vec<u32> = (0..200u32).map(|i| (i * 3 + (i % 7)) & 0xFF).collect();
+        let constant = vec![42u32; 100];
+        for bytepix in [1usize, 2, 4] {
+            rice_roundtrip(&smooth, bytepix);
+            rice_roundtrip(&constant, bytepix);
+            rice_roundtrip(&words(9, 333, u32::MAX), bytepix);
+            rice_roundtrip(&words(3, 97, 0xFF), bytepix);
+        }
+        // Extremes of the 16- and 32-bit ranges, alternating.
+        let extremes16: Vec<u32> = (0..64)
+            .map(|i| if i % 2 == 0 { 0 } else { 0xFFFF })
+            .collect();
+        rice_roundtrip(&extremes16, 2);
+        let extremes32: Vec<u32> = (0..64)
+            .map(|i| if i % 2 == 0 { 0 } else { u32::MAX })
+            .collect();
+        rice_roundtrip(&extremes32, 4);
+    }
+
+    #[test]
+    fn gzip_tiles_round_trip_in_both_layouts() {
+        let values = words(5, 40, 0xFFFF);
+        for shuffled in [false, true] {
+            let stream = gzip_tile_encode(&values, 2, shuffled);
+            let mut out = vec![0u32; values.len()];
+            gzip_decode(&stream, 2, shuffled, &mut out).unwrap();
+            assert_eq!(out, values, "shuffled {shuffled}");
+        }
+    }
+
+    #[test]
+    fn crc32_matches_the_check_value() {
+        // The standard check value of CRC-32/IEEE.
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+}

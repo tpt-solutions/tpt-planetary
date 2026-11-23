@@ -93,6 +93,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scaling and nulls, checked against astropy.
 - FITS binary table writer (`fits::write_bintable`) for the same fixed-width
   forms, with TSCAL, TZERO and TNULL; checked by a round trip and by astropy.
+- FITS tile-compressed integer images written with `write_compressed_image` (RICE_1, GZIP_1, GZIP_2),
+  checked by round trip and by astropy.
 - FITS binary table writer for bit (X), complex (C, M) and variable-length (P, Q) columns, checked by
   round trip and by astropy.
 - FITS ASCII table writer (`fits::write_ascii_table`) for A, I, Fw.d and Ew.d fields,
