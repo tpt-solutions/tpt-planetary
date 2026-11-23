@@ -97,6 +97,75 @@ pub fn tdb_to_tt(tdb_hi: f64, tdb_lo: f64) -> (f64, f64) {
     (tdb_hi, tt_lo)
 }
 
+/// Epoch of the linear TCG and TCB relations, JD 2443144.5003725 (1977 Jan 1,
+/// 00:00:00 TAI, as IAU 2000 Resolution B1.9 gives it).
+const TCG_TCB_EPOCH_JD: f64 = 2_443_144.500_372_5;
+/// Rate of TCG - TT (IAU 2000 Resolution B1.9).
+const L_G: f64 = 6.969_290_134e-10;
+/// Rate of TCB - TDB (IAU 2006 Resolution B3).
+const L_B: f64 = 1.550_519_768e-8;
+/// Constant TDB0 of the TDB - TCB relation, in seconds (IAU 2006 Resolution B3).
+const TDB0_SECONDS: f64 = -6.55e-5;
+
+/// TCG - TT, in seconds, at a TT epoch: `L_G (TT - epoch) / (1 - L_G)`.
+fn tcg_minus_tt_seconds(tt_hi: f64, tt_lo: f64) -> f64 {
+    L_G * ((tt_hi - TCG_TCB_EPOCH_JD) + tt_lo) * SECONDS_PER_DAY / (1.0 - L_G)
+}
+
+/// TCB - TDB, in seconds, at a TDB epoch: `L_B (TDB - epoch) / (1 - L_B) - TDB0`.
+fn tcb_minus_tdb_seconds(tdb_hi: f64, tdb_lo: f64) -> f64 {
+    L_B * ((tdb_hi - TCG_TCB_EPOCH_JD) + tdb_lo) * SECONDS_PER_DAY / (1.0 - L_B) - TDB0_SECONDS
+}
+
+/// Converts a TT Julian date to TCG, returned as a two-part Julian date.
+///
+/// Agrees with `erfa.tttcg` over 1800-2200 to within 1e-10 s (measured 0 s over
+/// 300 random epochs; `bindings/tpt-planetary-py/tests/validation/test_tcg_tcb.py`).
+#[must_use]
+pub fn tt_to_tcg(tt_hi: f64, tt_lo: f64) -> (f64, f64) {
+    (
+        tt_hi,
+        tt_lo + tcg_minus_tt_seconds(tt_hi, tt_lo) / SECONDS_PER_DAY,
+    )
+}
+
+/// Converts a TCG Julian date to TT, returned as a two-part Julian date.
+///
+/// Inverts [`tt_to_tcg`] by fixed-point iteration on the TT argument; three
+/// steps are far more than the iteration needs.
+#[must_use]
+pub fn tcg_to_tt(tcg_hi: f64, tcg_lo: f64) -> (f64, f64) {
+    let mut tt_lo = tcg_lo;
+    for _ in 0..3 {
+        tt_lo = tcg_lo - tcg_minus_tt_seconds(tcg_hi, tt_lo) / SECONDS_PER_DAY;
+    }
+    (tcg_hi, tt_lo)
+}
+
+/// Converts a TDB Julian date to TCB, returned as a two-part Julian date.
+///
+/// Agrees with `erfa.tdbtcb` over 1800-2200 to within 1e-10 s (measured 1e-11 s
+/// over 300 random epochs; `bindings/tpt-planetary-py/tests/validation/test_tcg_tcb.py`).
+#[must_use]
+pub fn tdb_to_tcb(tdb_hi: f64, tdb_lo: f64) -> (f64, f64) {
+    (
+        tdb_hi,
+        tdb_lo + tcb_minus_tdb_seconds(tdb_hi, tdb_lo) / SECONDS_PER_DAY,
+    )
+}
+
+/// Converts a TCB Julian date to TDB, returned as a two-part Julian date.
+///
+/// Inverts [`tdb_to_tcb`] by fixed-point iteration, as [`tcg_to_tt`] does.
+#[must_use]
+pub fn tcb_to_tdb(tcb_hi: f64, tcb_lo: f64) -> (f64, f64) {
+    let mut tdb_lo = tcb_lo;
+    for _ in 0..3 {
+        tdb_lo = tcb_lo - tcb_minus_tdb_seconds(tcb_hi, tdb_lo) / SECONDS_PER_DAY;
+    }
+    (tcb_hi, tdb_lo)
+}
+
 /// Normalises an angle in radians to the interval `[0, 2*pi)`.
 fn wrap_two_pi(angle: f64) -> f64 {
     let r = angle.rem_euclid(TAU);

@@ -5,6 +5,8 @@
 //! Usage (stdin is one whitespace-separated record per line):
 //!
 //! - `tdb`: `tt_hi tt_lo` -> TDB - TT in seconds.
+//! - `tt_tcg`, `tcg_tt`: `hi lo` -> TCG - TT, or TT - TCG, in seconds.
+//! - `tdb_tcb`, `tcb_tdb`: `hi lo` -> TCB - TDB, or TDB - TCB, in seconds.
 //! - `obl`: `tt_hi tt_lo` -> IAU 2006 mean obliquity in arcseconds.
 //! - `ecl`: `ra_deg dec_deg` -> J2000 mean ecliptic `lon_deg lat_deg`.
 //! - `pm`: `xp_arcsec yp_arcsec` -> the nine elements of the polar-motion
@@ -81,6 +83,16 @@ fn main() {
             match mode.as_str() {
                 "tdb" => parse_fields(&line, 2)
                     .map(|v| time::tdb_minus_tt_seconds(v[0], v[1]).to_string()),
+                "tt_tcg" | "tcg_tt" | "tdb_tcb" | "tcb_tdb" => parse_fields(&line, 2).map(|v| {
+                    let (hi, lo) = match mode.as_str() {
+                        "tt_tcg" => time::tt_to_tcg(v[0], v[1]),
+                        "tcg_tt" => time::tcg_to_tt(v[0], v[1]),
+                        "tdb_tcb" => time::tdb_to_tcb(v[0], v[1]),
+                        _ => time::tcb_to_tdb(v[0], v[1]),
+                    };
+                    // The offset in seconds, from the input epoch.
+                    (((hi - v[0]) + (lo - v[1])) * 86_400.0).to_string()
+                }),
                 "obl" => parse_fields(&line, 2)
                     .map(|v| time::mean_obliquity_iau2006_arcsec(v[0], v[1]).to_string()),
                 "ecl" => parse_fields(&line, 2).map(|v| {
