@@ -1607,6 +1607,7 @@ fn decode_element(col: &Column, raw: &[u8]) -> f64 {
 
 /// Values of one column of a binary table, as stored (big-endian on disk).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(feature = "std")]
 pub enum ColumnData<'a> {
     /// `L`: logical values, stored as `T` or `F`.
     Logical(&'a [bool]),
@@ -1628,6 +1629,7 @@ pub enum ColumnData<'a> {
 
 /// One column of a binary table to write.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(feature = "std")]
 pub struct TableColumn<'a> {
     /// Column name (`TTYPEn`).
     pub name: &'a str,
@@ -1644,6 +1646,7 @@ pub struct TableColumn<'a> {
     pub tnull: Option<i64>,
 }
 
+#[cfg(feature = "std")]
 impl ColumnData<'_> {
     /// The `TFORM` type letter and bytes per element.
     fn code_and_size(&self) -> (char, usize) {
@@ -1675,6 +1678,7 @@ impl ColumnData<'_> {
 }
 
 /// Appends the big-endian bytes of the `repeat` values of one row of a column.
+#[cfg(feature = "std")]
 fn push_row_values(data: &mut Vec<u8>, col: &TableColumn<'_>, row: usize) {
     let r = col.repeat;
     match col.data {
@@ -1728,6 +1732,7 @@ fn push_row_values(data: &mut Vec<u8>, col: &TableColumn<'_>, row: usize) {
 /// value count is not a whole number of rows, or a string is wider than its column; [`FitsError::Unsupported`] for a
 /// non-finite `tscal` or `tzero`; [`FitsError::InvalidKeyword`] for a reserved
 /// keyword in `header`.
+#[cfg(feature = "std")]
 pub fn write_bintable(columns: &[TableColumn<'_>], header: &[WriteCard<'_>]) -> Result<Vec<u8>> {
     let mut rows: Option<usize> = None;
     let mut width = 0usize;
