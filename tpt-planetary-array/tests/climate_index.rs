@@ -158,3 +158,71 @@ fn relative_index_removes_the_basin_wide_warming() {
         assert!((rel[t] - (nino[t] - tropics[t])).abs() < 1e-10, "month {t}");
     }
 }
+
+#[test]
+fn lazy_expressions_match_the_eager_indices() {
+    use tpt_planetary_array::lazy::Region;
+    use tpt_planetary_array::ops::climate::{nino34_expr, nino34_relative_expr};
+
+    let data = field_data(true);
+    let field = zarr_field(&data);
+    let lat = lat_coords();
+    let lon = lon_coords();
+    let eager = nino34(&field, &lat, &lon).unwrap();
+    let eager_rel = nino34_relative(&field, &lat, &lon).unwrap();
+
+    let whole = |expr: &Expr| {
+        let shape = expr.shape();
+        assert_eq!(shape, vec![NT as u64], "one value per month");
+        expr.eval_region(&Region {
+            start: vec![0],
+            count: vec![NT as u64],
+            step: vec![1],
+        })
+        .unwrap()
+    };
+    let lazy = whole(&nino34_expr(&field, &lat, &lon).unwrap());
+    let lazy_rel = whole(&nino34_relative_expr(&field, &lat, &lon).unwrap());
+    for t in 0..NT {
+        assert!(lazy.valid[t]);
+        assert!((lazy.values[t] - eager[t]).abs() < 1e-12, "month {t}");
+        assert!(
+            (lazy_rel.values[t] - eager_rel[t]).abs() < 1e-12,
+            "month {t}"
+        );
+    }
+}
+
+#[test]
+fn a_lazy_index_can_be_evaluated_in_parts() {
+    use tpt_planetary_array::lazy::Region;
+    use tpt_planetary_array::ops::climate::nino34_expr;
+
+    let data = field_data(true);
+    let field = zarr_field(&data);
+    let expr = nino34_expr(&field, &lat_coords(), &lon_coords()).unwrap();
+    let whole = expr
+        .eval_region(&Region {
+            start: vec![0],
+            count: vec![NT as u64],
+            step: vec![1],
+        })
+        .unwrap();
+    // Two regions, the second starting mid-series, must give the same values.
+    let first = expr
+        .eval_region(&Region {
+            start: vec![0],
+            count: vec![25],
+            step: vec![1],
+        })
+        .unwrap();
+    let second = expr
+        .eval_region(&Region {
+            start: vec![25],
+            count: vec![(NT - 25) as u64],
+            step: vec![1],
+        })
+        .unwrap();
+    let joined: Vec<f64> = first.values.iter().chain(&second.values).copied().collect();
+    assert_eq!(joined, whole.values);
+}

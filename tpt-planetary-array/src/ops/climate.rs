@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::lazy::Expr;
+use crate::lazy::{Block, Expr, NodeOp, Region};
 use crate::ops::elementwise::ArithOp;
 use crate::ops::reduce::Reduction;
 use crate::selection::{Selection, Slice};
@@ -135,6 +135,118 @@ pub fn nino34_relative(sst: &Expr, lat_deg: &[f64], lon_deg: &[f64]) -> Result<V
     let nino = box_mean_series(&anom, lat_deg, lon_deg, (-5.0, 5.0), (190.0, 240.0))?;
     let tropics = box_mean_series(&anom, lat_deg, lon_deg, (-20.0, 20.0), (0.0, 360.0))?;
     Ok(nino.iter().zip(&tropics).map(|(n, t)| n - t).collect())
+}
+
+/// A lazy area-weighted box mean over a `[time, lat, lon]` field that has
+/// already been sliced to the box. Output is one value per time step.
+#[derive(Debug)]
+struct BoxMean {
+    /// The boxed field, shape `[time, box lat, box lon]`.
+    boxed: Expr,
+    /// Cosine-of-latitude weight of each latitude row in the box.
+    weights: Vec<f64>,
+}
+
+impl NodeOp for BoxMean {
+    fn shape(&self) -> Vec<u64> {
+        vec![self.boxed.shape()[0]]
+    }
+
+    fn eval_region(&self, region: &Region) -> Result<Block> {
+        let shape = self.boxed.shape();
+        let (nlat, nlon) = (shape[1] as usize, shape[2] as usize);
+        let count = region.count[0];
+        // The same time indices, with the whole box.
+        let input = Region {
+            start: vec![region.start[0], 0, 0],
+            count: vec![count, shape[1], shape[2]],
+            step: vec![region.step[0], 1, 1],
+        };
+        let block = self.boxed.eval_region(&input)?;
+        let per_time = nlat * nlon;
+        let mut values = Vec::with_capacity(count as usize);
+        let mut valid = Vec::with_capacity(count as usize);
+        for t in 0..count as usize {
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for (i, &w) in self.weights.iter().enumerate() {
+                for j in 0..nlon {
+                    let k = t * per_time + i * nlon + j;
+                    if block.valid[k] {
+                        num += block.values[k] * w;
+                        den += w;
+                    }
+                }
+            }
+            let value = if den == 0.0 { f64::NAN } else { num / den };
+            values.push(value);
+            valid.push(!value.is_nan());
+        }
+        Ok(Block { values, valid })
+    }
+}
+
+/// The area-weighted box mean of a `[time, lat, lon]` field as a lazy
+/// expression of shape `[time]`. Its values are those of [`box_mean_series`];
+/// nothing is read until the expression is evaluated.
+///
+/// # Errors
+///
+/// The same as [`box_mean_series`].
+pub fn box_mean_expr(
+    field: &Expr,
+    lat_deg: &[f64],
+    lon_deg: &[f64],
+    lat_range: (f64, f64),
+    lon_range: (f64, f64),
+) -> Result<Expr> {
+    let shape = field.shape();
+    if shape.len() != 3 {
+        return Err(Error::InvalidSelection(
+            "a box mean needs a [time, lat, lon] field".into(),
+        ));
+    }
+    if shape[1] != lat_deg.len() as u64 || shape[2] != lon_deg.len() as u64 {
+        return Err(Error::InvalidSelection(
+            "coordinate lengths do not match the field shape".into(),
+        ));
+    }
+    let (la, lb) = box_indices(lat_deg, lat_range.0, lat_range.1, "latitude")?;
+    let (oa, ob) = box_indices(lon_deg, lon_range.0, lon_range.1, "longitude")?;
+    let boxed = field.slice(&[
+        Selection::ALL,
+        Selection::Range(Slice::range(la as i64, lb as i64)),
+        Selection::Range(Slice::range(oa as i64, ob as i64)),
+    ])?;
+    let weights: Vec<f64> = lat_deg[la..lb]
+        .iter()
+        .map(|&lat| lat.to_radians().cos().max(0.0))
+        .collect();
+    Ok(Expr::from_op(BoxMean { boxed, weights }))
+}
+
+/// The Niño-3.4 index as a lazy `[time]` expression: the monthly anomaly
+/// averaged over 5°S–5°N, 190°E–240°E (see [`nino34`]).
+///
+/// # Errors
+///
+/// Propagates the errors of [`monthly_anomaly`] and [`box_mean_expr`].
+pub fn nino34_expr(field: &Expr, lat_deg: &[f64], lon_deg: &[f64]) -> Result<Expr> {
+    let anom = monthly_anomaly(field)?;
+    box_mean_expr(&anom, lat_deg, lon_deg, (-5.0, 5.0), (190.0, 240.0))
+}
+
+/// The relative Niño-3.4 index as a lazy `[time]` expression (see
+/// [`nino34_relative`]).
+///
+/// # Errors
+///
+/// Propagates the errors of [`monthly_anomaly`] and [`box_mean_expr`].
+pub fn nino34_relative_expr(field: &Expr, lat_deg: &[f64], lon_deg: &[f64]) -> Result<Expr> {
+    let anom = monthly_anomaly(field)?;
+    let nino = box_mean_expr(&anom, lat_deg, lon_deg, (-5.0, 5.0), (190.0, 240.0))?;
+    let tropics = box_mean_expr(&anom, lat_deg, lon_deg, (-20.0, 20.0), (0.0, 360.0))?;
+    nino.arith(ArithOp::Sub, &tropics)
 }
 
 #[cfg(all(test, feature = "std"))]
