@@ -156,6 +156,7 @@ fn parse_fill(v: &Value, dtype: &DType) -> Result<FillValue> {
         let bits = u64::from_str_radix(hex, 16)
             .map_err(|_| Error::InvalidMetadata(format!("bad hex fill '{s}'")))?;
         return match dtype.kind() {
+            Kind::Float(16) => Ok(FillValue::Float(crate::dtype::f16_to_f64(bits as u16))),
             Kind::Float(32) => Ok(FillValue::Float(f64::from(f32::from_bits(bits as u32)))),
             Kind::Float(_) => Ok(FillValue::Float(f64::from_bits(bits))),
             _ => Err(Error::Unsupported("hex fill for complex dtype".into())),

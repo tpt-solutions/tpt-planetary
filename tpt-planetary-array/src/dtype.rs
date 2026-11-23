@@ -25,7 +25,7 @@ pub enum Kind {
     Int(u8),
     /// Unsigned integer of 8, 16, 32 or 64 bits.
     UInt(u8),
-    /// IEEE-754 float of 32 or 64 bits.
+    /// IEEE-754 float of 16, 32 or 64 bits.
     Float(u8),
     /// Complex number with 64 bits (two `f32`) or 128 bits (two `f64`) in total.
     Complex(u8),
@@ -50,7 +50,7 @@ impl DType {
             Kind::Int(b) | Kind::UInt(b) if !matches!(b, 8 | 16 | 32 | 64) => {
                 Err(Error::Unsupported(format!("integer width {b}")))
             }
-            Kind::Float(b) if !matches!(b, 32 | 64) => {
+            Kind::Float(b) if !matches!(b, 16 | 32 | 64) => {
                 Err(Error::Unsupported(format!("float width {b}")))
             }
             Kind::Complex(b) if !matches!(b, 64 | 128) => {
@@ -201,6 +201,7 @@ impl DType {
             "uint16" => Kind::UInt(16),
             "uint32" => Kind::UInt(32),
             "uint64" => Kind::UInt(64),
+            "float16" => Kind::Float(16),
             "float32" => Kind::Float(32),
             "float64" => Kind::Float(64),
             "complex64" => Kind::Complex(64),
@@ -251,6 +252,7 @@ impl DType {
                 Kind::Bool => f64::from(chunk[0] != 0),
                 Kind::Int(b) => sign_extend(raw, b) as f64,
                 Kind::UInt(_) => raw as f64,
+                Kind::Float(16) => f16_to_f64(raw as u16),
                 Kind::Float(32) => f32::from_bits(raw as u32) as f64,
                 Kind::Float(_) => f64::from_bits(raw),
                 _ => unreachable!("checked by is_real_numeric"),
@@ -282,6 +284,7 @@ impl DType {
                 Kind::Bool => u64::from(v != 0.0),
                 Kind::Int(_) => v as i64 as u64,
                 Kind::UInt(_) => v as u64,
+                Kind::Float(16) => u64::from(f64_to_f16(v)),
                 Kind::Float(32) => u64::from((v as f32).to_bits()),
                 Kind::Float(_) => v.to_bits(),
                 _ => unreachable!("checked by is_real_numeric"),
@@ -331,7 +334,7 @@ mod tests {
         assert_eq!(DType::from_v2("|S7").unwrap().item_size(), 7);
         assert_eq!(DType::from_v2("<U5").unwrap().item_size(), 20);
         assert_eq!(DType::from_v2("<c16").unwrap().item_size(), 16);
-        assert!(DType::from_v2("<f2").is_err());
+        assert_eq!(DType::from_v2("<f2").unwrap().item_size(), 2);
         assert!(DType::from_v2("<M8").is_err());
     }
 
@@ -365,5 +368,132 @@ mod tests {
         assert_eq!(d.v3_name().unwrap(), "float32");
         assert_eq!(d.endian(), Endian::Big);
         assert!(DType::from_v3("string", Endian::Little).is_err());
+    }
+}
+
+/// `2^k` for `k` in the normal `f64` exponent range, built from its bits.
+fn pow2(k: i32) -> f64 {
+    f64::from_bits(((k + 1023) as u64) << 52)
+}
+
+/// The value of an IEEE binary16 bit pattern, exactly (every half is a double).
+pub(crate) fn f16_to_f64(bits: u16) -> f64 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = i32::from((bits >> 10) & 0x1f);
+    let mant = f64::from(bits & 0x3ff);
+    let magnitude = if exp == 0x1f {
+        if mant == 0.0 { f64::INFINITY } else { f64::NAN }
+    } else if exp == 0 {
+        // Subnormal: mant * 2^-24.
+        mant * pow2(-24)
+    } else {
+        // Normal: (1024 + mant) * 2^(exp - 25).
+        (1024.0 + mant) * pow2(exp - 25)
+    };
+    sign * magnitude
+}
+
+/// The binary16 bit pattern nearest to `v`, rounding ties to even. Values beyond
+/// the largest half become infinity; NaN becomes a quiet NaN.
+pub(crate) fn f64_to_f16(v: f64) -> u16 {
+    if v.is_nan() {
+        return 0x7e00;
+    }
+    let sign: u16 = if v.is_sign_negative() { 0x8000 } else { 0 };
+    let a = v.abs();
+    if a.is_infinite() || a >= 65520.0 {
+        // 65520 is the midpoint between the largest half (65504) and 2^16.
+        return sign | 0x7c00;
+    }
+    if a == 0.0 {
+        return sign;
+    }
+    // Round `x` to an integer, ties to even, for `0 <= x < 2^20`.
+    let round_even = |x: f64| -> u32 {
+        let t = x as u32;
+        let frac = x - f64::from(t);
+        if frac > 0.5 || (frac == 0.5 && t % 2 == 1) {
+            t + 1
+        } else {
+            t
+        }
+    };
+    if a < pow2(-14) {
+        // Subnormal: the mantissa counts units of 2^-24; a carry into 1024 is the
+        // smallest normal, which the bit layout represents directly.
+        let m = round_even(a / pow2(-24));
+        return sign | m as u16;
+    }
+    // Normal: exponent e with 2^e <= a < 2^(e+1), mantissa rounded at 2^(e-10).
+    let e = (((a.to_bits() >> 52) & 0x7ff) as i32) - 1023;
+    let q = round_even(a / pow2(e - 10));
+    let (e, q) = if q == 2048 { (e + 1, 1024) } else { (e, q) };
+    if e > 15 {
+        return sign | 0x7c00;
+    }
+    sign | (((e + 15) as u16) << 10) | (q - 1024) as u16
+}
+
+#[cfg(all(test, feature = "std"))]
+mod float16_tests {
+    use super::*;
+
+    #[test]
+    fn every_finite_half_round_trips_exactly() {
+        for bits in 0..=u16::MAX {
+            let v = f16_to_f64(bits);
+            if v.is_nan() {
+                assert!(f16_to_f64(f64_to_f16(v)).is_nan());
+                continue;
+            }
+            assert_eq!(f64_to_f16(v), bits, "pattern {bits:#06x} value {v}");
+        }
+    }
+
+    #[test]
+    fn known_values_and_rounding_boundaries() {
+        assert_eq!(f64_to_f16(1.0), 0x3c00);
+        assert_eq!(f64_to_f16(-2.5), 0xc100);
+        assert_eq!(f64_to_f16(65504.0), 0x7bff);
+        assert_eq!(f64_to_f16(65519.0), 0x7bff);
+        assert_eq!(f64_to_f16(65520.0), 0x7c00);
+        assert_eq!(f64_to_f16(f64::INFINITY), 0x7c00);
+        assert_eq!(f64_to_f16(f64::NEG_INFINITY), 0xfc00);
+        assert_eq!(f64_to_f16(2f64.powi(-24)), 0x0001);
+        // Exactly half the smallest subnormal ties to even (zero); a hair more rounds up.
+        assert_eq!(f64_to_f16(2f64.powi(-25)), 0x0000);
+        assert_eq!(f64_to_f16(2f64.powi(-25) * 1.000001), 0x0001);
+        assert_eq!(f64_to_f16(0.1), 0x2e66);
+        assert_eq!(f64_to_f16(-0.0), 0x8000);
+        assert_eq!(f64_to_f16(f64::NAN) & 0x7c00, 0x7c00);
+    }
+
+    #[test]
+    fn matches_numpy_float16_rounding() {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/float16_rounding.tsv"),
+        )
+        .unwrap();
+        let mut n = 0;
+        for line in text.lines() {
+            let (v, bits) = line.split_once('\t').unwrap();
+            let v: f64 = v.parse().unwrap();
+            let bits: u16 = bits.parse().unwrap();
+            assert_eq!(f64_to_f16(v), bits, "value {v}");
+            n += 1;
+        }
+        assert!(n > 4000);
+    }
+
+    #[test]
+    fn float16_arrays_decode_and_encode_through_dtype() {
+        let dt = DType::from_v3("float16", Endian::Little).unwrap();
+        assert_eq!(dt.item_size(), 2);
+        assert_eq!(dt.v3_name().unwrap(), "float16");
+        let values = [1.0, -0.5, 65504.0, 0.25];
+        let bytes = dt.encode_f64(&values).unwrap();
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(dt.decode_f64(&bytes).unwrap(), values.to_vec());
     }
 }

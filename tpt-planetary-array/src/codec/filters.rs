@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use serde_json::Value;
 
 use super::{Codec, config_i64};
-use crate::dtype::{DType, Endian, Kind, read_uint};
+use crate::dtype::{DType, Endian, Kind, f16_to_f64, f64_to_f16, read_uint};
 use crate::error::{Error, Result};
 
 /// Byte shuffle: groups the first byte of every element, then the second
@@ -132,6 +132,7 @@ impl DeltaCodec {
 
     fn combine_sub(&self, x: u64, p: u64) -> u64 {
         match self.dtype.kind() {
+            Kind::Float(16) => u64::from(f64_to_f16(f16_to_f64(x as u16) - f16_to_f64(p as u16))),
             Kind::Float(32) => f32_bits(f32::from_bits(x as u32) - f32::from_bits(p as u32)),
             Kind::Float(_) => (f64::from_bits(x) - f64::from_bits(p)).to_bits(),
             _ => self.mask(x.wrapping_sub(p)),
@@ -140,6 +141,7 @@ impl DeltaCodec {
 
     fn combine_add(&self, d: u64, p: u64) -> u64 {
         match self.dtype.kind() {
+            Kind::Float(16) => u64::from(f64_to_f16(f16_to_f64(d as u16) + f16_to_f64(p as u16))),
             Kind::Float(32) => f32_bits(f32::from_bits(d as u32) + f32::from_bits(p as u32)),
             Kind::Float(_) => (f64::from_bits(d) + f64::from_bits(p)).to_bits(),
             _ => self.mask(d.wrapping_add(p)),

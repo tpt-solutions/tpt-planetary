@@ -180,6 +180,10 @@ impl FillValue {
                 };
                 push_uint(&mut out, raw, usize::from(b / 8), big);
             }
+            (_, Kind::Float(16)) => {
+                let f = self.as_f64().ok_or_else(|| mismatch(self, dtype))?;
+                push_uint(&mut out, u64::from(crate::dtype::f64_to_f16(f)), 2, big);
+            }
             (_, Kind::Float(32)) => {
                 let f = self.as_f64().ok_or_else(|| mismatch(self, dtype))?;
                 push_uint(&mut out, u64::from((f as f32).to_bits()), 4, big);

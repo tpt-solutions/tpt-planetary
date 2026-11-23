@@ -108,6 +108,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and `read_vla` (with the heap and THEAP), checked against astropy.
 - FITS ASCII tables: `Hdu::ascii_table` reads `XTENSION = 'TABLE'` columns of A, I,
   F, E and D fields with scaling and TNULL, checked against astropy.
+- Zarr v3 `float16` data type (IEEE binary16, round to nearest even), read and written, with
+  the filters and fill values; checked against numpy's rounding.
 - Group-by aggregations over integer labels: `Expr::group_reduce` with sum, mean, min, max and count
   (`GroupOp`), as lazy expressions; `Expr::group_mean` is its mean.
 - TCG and TCB time scales (`time::tt_to_tcg`, `tdb_to_tcb` and their inverses), checked
