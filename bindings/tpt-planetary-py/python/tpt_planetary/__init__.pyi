@@ -1,6 +1,6 @@
 """Type stubs for tpt_planetary. Must match the names exported by the extension."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from os import PathLike
 from typing import Final, Literal, TypeAlias, overload
 
@@ -164,6 +164,20 @@ class ZarrArray:
     def mean(self) -> float | None: ...
     def min(self) -> float | None: ...
     def max(self) -> float | None: ...
+
+def nino34(field: ZarrArray, lat_deg: Sequence[float], lon_deg: Sequence[float]) -> Float64Array:
+    """Niño-3.4 SST anomaly index, one value per month.
+
+    ``field`` has shape ``(time, lat, lon)`` with monthly steps; the coordinates
+    are in degrees (latitudes increasing, longitudes east and increasing).
+    """
+    ...
+
+def nino34_relative(
+    field: ZarrArray, lat_deg: Sequence[float], lon_deg: Sequence[float]
+) -> Float64Array:
+    """Niño-3.4 anomaly minus the 20°S–20°N mean anomaly of the same month."""
+    ...
 
 class NetCdf3File:
     """A NetCDF-3 (classic or 64-bit offset) file read into memory.

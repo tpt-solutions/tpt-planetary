@@ -29,7 +29,7 @@ pub struct ZarrArray {
     /// Handle used for slice reads.
     array: Array,
     /// Lazy expression over a second handle to the same array, used for reductions.
-    expr: Expr,
+    pub(crate) expr: Expr,
 }
 
 /// Opens the Zarr array stored at a local directory `path`.

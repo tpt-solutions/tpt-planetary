@@ -12,6 +12,7 @@
 
 mod array;
 mod astro;
+mod climate;
 mod core_api;
 mod ephemeris;
 mod errors;
@@ -60,6 +61,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Array: local Zarr v2/v3 directories, NetCDF-3 files and lazy reductions.
     m.add_class::<array::ZarrArray>()?;
     m.add_function(wrap_pyfunction!(array::open_zarr, m)?)?;
+    m.add_function(wrap_pyfunction!(climate::nino34, m)?)?;
+    m.add_function(wrap_pyfunction!(climate::nino34_relative, m)?)?;
     m.add_class::<array::NetCdf3File>()?;
     m.add_function(wrap_pyfunction!(array::open_netcdf3, m)?)?;
     m.add_class::<hdf5::Hdf5Data>()?;
